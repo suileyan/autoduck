@@ -94,10 +94,11 @@ fn main() -> anyhow::Result<()> {
     };
     let auto_start = autostart::is_auto_start_enabled();
     let tray_event_tx_clone = tray_event_tx.clone();
+    let running_tray = running.clone();
     let tray_handle = std::thread::Builder::new()
         .name("tray".into())
         .spawn(move || {
-            if let Err(e) = tray_icon::run_tray(tray_event_tx_clone, tray_mode, auto_start) {
+            if let Err(e) = tray_icon::run_tray(tray_event_tx_clone, tray_mode, auto_start, running_tray) {
                 eprintln!("托盘线程错误: {}", e);
             }
         })?;
@@ -161,19 +162,25 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 TrayEvent::OpenSettings => {
+                    // 清理已结束的 GUI 线程
+                    if gui_handle.as_ref().map_or(false, |h| h.is_finished()) {
+                        if let Some(h) = gui_handle.take() {
+                            let _ = h.join();
+                        }
+                    }
                     // Launch GUI thread if not already running
-                    let gui_still_running = gui_handle.as_ref().map_or(false, |h| !h.is_finished());
-                    if !gui_still_running {
+                    if gui_handle.is_none() {
                         let gui_config = config.clone();
                         let gui_msg_tx = gui_msg_tx.clone();
                         let gui_update_rx = gui_update_rx.clone();
                         let handle = std::thread::Builder::new()
                             .name("gui".into())
                             .spawn(move || {
+                                // run_event_loop() 默认在最后一个窗口关闭时退出
                                 match GuiApp::new(&gui_config, gui_msg_tx, gui_update_rx) {
                                     Ok(gui) => {
                                         gui.show();
-                                        slint::run_event_loop().unwrap();
+                                        let _ = slint::run_event_loop();
                                     }
                                     Err(e) => {
                                         eprintln!("创建设置窗口失败: {}", e);
@@ -223,7 +230,11 @@ fn main() -> anyhow::Result<()> {
     let _ = volume_cmd_tx.send(VolumeCommand::Stop);
     let _ = vad_handle.join();
     let _ = volume_handle.join();
-    let _ = tray_handle.join();
+    // 托盘线程通过 running 标志退出，带超时等待
+    match tray_handle.join() {
+        Ok(()) => {}
+        Err(_) => eprintln!("托盘线程 join 失败"),
+    }
     if let Some(h) = gui_handle {
         let _ = h.join();
     }

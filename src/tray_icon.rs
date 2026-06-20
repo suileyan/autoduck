@@ -4,10 +4,12 @@ use crossbeam_channel::Sender;
 use muda::{
     CheckMenuItemBuilder, Menu, MenuId, MenuItemBuilder, PredefinedMenuItem, Submenu,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, WM_QUIT,
+    DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
 };
 
 // Fixed menu item IDs for event matching
@@ -169,17 +171,15 @@ pub fn run_tray(
     event_sender: Sender<TrayEvent>,
     mode: DuckMode,
     auto_start: bool,
+    running: Arc<AtomicBool>,
 ) -> Result<()> {
     let app = TrayApp::new(event_sender, mode, auto_start)?;
 
-    loop {
+    while running.load(Ordering::Relaxed) {
         // Process Windows messages
         unsafe {
             let mut msg = MSG::default();
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                if msg.message == WM_QUIT {
-                    return Ok(());
-                }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
@@ -193,4 +193,6 @@ pub fn run_tray(
         // Small sleep to avoid busy-waiting
         std::thread::sleep(Duration::from_millis(10));
     }
+
+    Ok(())
 }

@@ -75,8 +75,10 @@ impl AppConfig {
     }
 
     pub fn config_dir() -> PathBuf {
-        let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-        PathBuf::from(appdata).join("AutoDuck")
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."))
     }
 
     pub fn config_file_path() -> PathBuf {
