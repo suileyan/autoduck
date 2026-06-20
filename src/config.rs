@@ -15,6 +15,14 @@ pub enum DuckMode {
     Apps,
 }
 
+fn default_duck_duration_ms() -> u32 {
+    120
+}
+
+fn default_restore_duration_ms() -> u32 {
+    120
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AppConfig {
     pub duck_mode: DuckMode,
@@ -23,6 +31,10 @@ pub struct AppConfig {
     pub vad_threshold: f32,
     pub attack_frames: u32,
     pub release_frames: u32,
+    #[serde(default = "default_duck_duration_ms")]
+    pub duck_duration_ms: u32,
+    #[serde(default = "default_restore_duration_ms")]
+    pub restore_duration_ms: u32,
 }
 
 impl Default for AppConfig {
@@ -39,6 +51,8 @@ impl Default for AppConfig {
             vad_threshold: 0.5,
             attack_frames: 4,
             release_frames: 30,
+            duck_duration_ms: default_duck_duration_ms(),
+            restore_duration_ms: default_restore_duration_ms(),
         }
     }
 }

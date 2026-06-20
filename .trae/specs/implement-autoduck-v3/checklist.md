@@ -1,0 +1,25 @@
+- [x] 项目可编译通过，所有 Cargo.toml 依赖正确配置
+- [x] 配置文件可正确读取，不存在时自动创建默认配置
+- [x] AppConfig 结构体包含所有必需字段（duck_mode, duck_ratio, excluded_apps, vad_threshold, attack_frames, release_frames）
+- [x] VadStateMachine 防抖逻辑正确：连续 attack_frames 帧语音才进入 Speaking，连续 release_frames 帧静音才回到 Silent
+- [x] cpal 音频采集正常工作，数据正确降混为单声道
+- [x] 48000Hz → 16000Hz 重采样正确（3:1 抽取+低通滤波）
+- [x] 44100Hz → 16000Hz 重采样正确（rubato）
+- [x] 帧切分正确：每帧精确 256 采样点
+- [x] earshot VAD 可正常调用并返回语音概率分数
+- [x] VAD 线程从 ring buffer 读取数据并正确送入状态机
+- [x] 模式 A：检测到人声后系统主音量按 duck_ratio 乘法降低
+- [x] 模式 A：人声结束后系统主音量恢复到降音前水平
+- [x] 模式 A：pguidEventContext 正确区分自身操作与外部手动改音量
+- [x] 模式 B：检测到人声后非排除应用音量降低，排除应用音量不变
+- [x] 模式 B：人声结束后被压低的应用音量恢复到快照值
+- [x] 模式 B：说话期间新开启的非排除应用能被及时压低
+- [x] 模式 B：会话列表每 2 秒周期性更新
+- [x] 模式 B：进程名匹配统一大写比较
+- [x] 音量渐变：所有音量变化在 100-150ms 内分 8-10 步完成
+- [x] 单实例锁：第二个实例启动时自动退出
+- [x] 工作线程 panic 时退出前先恢复音量（崩溃检测后发送 Restore 命令）
+- [x] 托盘菜单包含：降音模式切换、开机自启开关、退出
+- [x] 开机自启：注册表 Run 键值可正确写入和删除
+- [x] 音量控制线程使用 COINIT_MULTITHREADED 初始化 COM
+- [x] 优雅退出：退出时恢复音量到正常水平

@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod audio_capture;
 mod autostart;
 mod config;
@@ -35,7 +37,7 @@ fn main() -> anyhow::Result<()> {
     let (crash_tx, crash_rx) = bounded::<String>(2);
 
     // 4. 启动音量控制线程
-    let volume_controller = VolumeController::new(config.duck_mode, config.excluded_apps.clone())?;
+    let volume_controller = VolumeController::new(config.duck_mode, config.excluded_apps.clone(), config.duck_duration_ms, config.restore_duration_ms)?;
     let duck_ratio = config.duck_ratio;
     let volume_worker = VolumeWorker::new(volume_controller, volume_cmd_rx, duck_ratio);
     let volume_cmd_tx_clone = volume_cmd_tx.clone();

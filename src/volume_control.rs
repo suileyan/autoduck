@@ -37,14 +37,14 @@ pub enum VolumeController {
 }
 
 impl VolumeController {
-    pub fn new(mode: DuckMode, excluded_apps: Vec<String>) -> Result<Self> {
+    pub fn new(mode: DuckMode, excluded_apps: Vec<String>, duck_duration_ms: u32, restore_duration_ms: u32) -> Result<Self> {
         match mode {
             DuckMode::Global => {
-                let ctrl = GlobalVolumeController::new()?;
+                let ctrl = GlobalVolumeController::new(duck_duration_ms, restore_duration_ms)?;
                 Ok(VolumeController::Global(ctrl))
             }
             DuckMode::Apps => {
-                let ctrl = AppsVolumeController::new(excluded_apps)?;
+                let ctrl = AppsVolumeController::new(excluded_apps, duck_duration_ms, restore_duration_ms)?;
                 Ok(VolumeController::Apps(ctrl))
             }
         }
@@ -79,6 +79,8 @@ impl VolumeController {
 pub struct GlobalVolumeController {
     endpoint_volume: IAudioEndpointVolume,
     volume_snapshot: Option<f32>,
+    duck_duration_ms: u32,
+    restore_duration_ms: u32,
 }
 
 // SAFETY: COM interfaces are safe to send between threads when used from
@@ -86,7 +88,7 @@ pub struct GlobalVolumeController {
 unsafe impl Send for GlobalVolumeController {}
 
 impl GlobalVolumeController {
-    pub fn new() -> Result<Self> {
+    pub fn new(duck_duration_ms: u32, restore_duration_ms: u32) -> Result<Self> {
         unsafe {
             CoInitializeEx(None, COINIT_MULTITHREADED)
                 .ok()
@@ -113,6 +115,8 @@ impl GlobalVolumeController {
         Ok(Self {
             endpoint_volume,
             volume_snapshot: None,
+            duck_duration_ms,
+            restore_duration_ms,
         })
     }
 
@@ -123,12 +127,16 @@ impl GlobalVolumeController {
             self.volume_snapshot = Some(current);
         }
         let target = current * ratio;
-        self.set_volume_gradual(target, 10, 12);
+        let steps = 10u32;
+        let step_delay_ms = self.duck_duration_ms / steps;
+        self.set_volume_gradual(target, steps, step_delay_ms as u64);
     }
 
     pub fn restore(&mut self) {
         if let Some(snapshot) = self.volume_snapshot.take() {
-            self.set_volume_gradual(snapshot, 10, 12);
+            let steps = 10u32;
+            let step_delay_ms = self.restore_duration_ms / steps;
+            self.set_volume_gradual(snapshot, steps, step_delay_ms as u64);
         }
     }
 
@@ -167,6 +175,8 @@ pub struct AppsVolumeController {
     excluded_apps: Vec<String>,
     volume_snapshots: HashMap<u32, f32>,
     duck_ratio: f32,
+    duck_duration_ms: u32,
+    restore_duration_ms: u32,
 }
 
 // SAFETY: COM interfaces are safe to send between threads when used from
@@ -174,7 +184,7 @@ pub struct AppsVolumeController {
 unsafe impl Send for AppsVolumeController {}
 
 impl AppsVolumeController {
-    pub fn new(excluded_apps: Vec<String>) -> Result<Self> {
+    pub fn new(excluded_apps: Vec<String>, duck_duration_ms: u32, restore_duration_ms: u32) -> Result<Self> {
         unsafe {
             CoInitializeEx(None, COINIT_MULTITHREADED)
                 .ok()
@@ -209,11 +219,15 @@ impl AppsVolumeController {
             excluded_apps,
             volume_snapshots: HashMap::new(),
             duck_ratio: 0.3,
+            duck_duration_ms,
+            restore_duration_ms,
         })
     }
 
     pub fn duck(&mut self, ratio: f32) {
         self.duck_ratio = ratio;
+        let steps = 10u32;
+        let step_delay_ms = self.duck_duration_ms / steps;
         let sessions = self.enumerate_sessions();
         for session in sessions {
             if let Some(simple_vol) = self.get_session_volume(&session) {
@@ -233,7 +247,7 @@ impl AppsVolumeController {
                         // Only save snapshot if we haven't already ducked this session
                         self.volume_snapshots.entry(pid).or_insert(current);
                         let target = current * ratio;
-                        set_volume_gradual_session(&simple_vol, target, 10, 12);
+                        set_volume_gradual_session(&simple_vol, target, steps, step_delay_ms as u64);
                     }
                 }
             }
@@ -241,12 +255,14 @@ impl AppsVolumeController {
     }
 
     pub fn restore(&mut self) {
+        let steps = 10u32;
+        let step_delay_ms = self.restore_duration_ms / steps;
         let sessions = self.enumerate_sessions();
         for session in sessions {
             if let Some(simple_vol) = self.get_session_volume(&session) {
                 if let Some(pid) = self.get_session_pid(&session) {
                     if let Some(&original) = self.volume_snapshots.get(&pid) {
-                        set_volume_gradual_session(&simple_vol, original, 10, 12);
+                        set_volume_gradual_session(&simple_vol, original, steps, step_delay_ms as u64);
                     }
                 }
             }
@@ -284,7 +300,9 @@ impl AppsVolumeController {
                             unsafe { simple_vol.GetMasterVolume().unwrap_or(1.0) };
                         self.volume_snapshots.insert(pid, current);
                         let target = current * self.duck_ratio;
-                        set_volume_gradual_session(&simple_vol, target, 10, 12);
+                        let steps = 10u32;
+                        let step_delay_ms = self.duck_duration_ms / steps;
+                        set_volume_gradual_session(&simple_vol, target, steps, step_delay_ms as u64);
                     }
                 }
             }
