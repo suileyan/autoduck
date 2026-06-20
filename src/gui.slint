@@ -16,6 +16,7 @@ export component SettingsWindow inherits Window {
     callback add-excluded-app(string);
     callback remove-excluded-app(string);
     callback refresh-apps();
+    callback window-closed();
 
     // Properties that Rust code will set
     in-out property <string> duck-mode: "global";

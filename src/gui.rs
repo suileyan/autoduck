@@ -160,15 +160,24 @@ impl GuiApp {
             let _ = sender_refresh.send(GuiMessage::RefreshApps);
         });
 
+        // --- Handle window close: quit the slint event loop ---
+        window.on_window_closed(|| {
+            let _ = slint::quit_event_loop();
+        });
+
         // --- Timer to poll for updates from main loop ---
         let win_timer = window.as_weak();
         let timer = slint::Timer::default();
         timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(100), move || {
+            let win = match win_timer.upgrade() {
+                Some(w) => w,
+                None => {
+                    // Window was dropped, quit the event loop
+                    let _ = slint::quit_event_loop();
+                    return;
+                }
+            };
             if let Ok(update) = update_rx.try_recv() {
-                let win = match win_timer.upgrade() {
-                    Some(w) => w,
-                    None => return,
-                };
                 match update {
                     GuiUpdate::AppList(apps) => {
                         let entries: Vec<AppEntry> = apps
