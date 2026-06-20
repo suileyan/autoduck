@@ -85,8 +85,10 @@ mod tests {
 
     #[test]
     fn test_short_noise_no_trigger() {
-        let mut sm = VadStateMachine::new(4, 30);
-        // 2 voice frames — less than attack_frames=4
+        let mut sm = VadStateMachine::new(6, 30);
+        // 4 voice frames — less than attack_frames=6
+        assert_eq!(sm.update(0.9, 0.5), None);
+        assert_eq!(sm.update(0.9, 0.5), None);
         assert_eq!(sm.update(0.9, 0.5), None);
         assert_eq!(sm.update(0.9, 0.5), None);
         assert_eq!(sm.state, VoiceState::Silent);
@@ -94,7 +96,9 @@ mod tests {
 
     #[test]
     fn test_attack_triggers_speaking() {
-        let mut sm = VadStateMachine::new(4, 30);
+        let mut sm = VadStateMachine::new(6, 30);
+        assert_eq!(sm.update(0.9, 0.5), None);
+        assert_eq!(sm.update(0.9, 0.5), None);
         assert_eq!(sm.update(0.9, 0.5), None);
         assert_eq!(sm.update(0.9, 0.5), None);
         assert_eq!(sm.update(0.9, 0.5), None);
@@ -104,9 +108,9 @@ mod tests {
 
     #[test]
     fn test_short_pause_no_recovery() {
-        let mut sm = VadStateMachine::new(4, 30);
+        let mut sm = VadStateMachine::new(6, 30);
         // Enter Speaking first
-        for _ in 0..4 {
+        for _ in 0..6 {
             sm.update(0.9, 0.5);
         }
         assert_eq!(sm.state, VoiceState::Speaking);
@@ -119,9 +123,9 @@ mod tests {
 
     #[test]
     fn test_release_triggers_silent() {
-        let mut sm = VadStateMachine::new(4, 30);
+        let mut sm = VadStateMachine::new(6, 30);
         // Enter Speaking first
-        for _ in 0..4 {
+        for _ in 0..6 {
             sm.update(0.9, 0.5);
         }
         assert_eq!(sm.state, VoiceState::Speaking);
@@ -136,13 +140,13 @@ mod tests {
 
     #[test]
     fn test_full_cycle() {
-        let mut sm = VadStateMachine::new(4, 30);
+        let mut sm = VadStateMachine::new(6, 30);
 
         // Start in Silent
         assert_eq!(sm.state, VoiceState::Silent);
 
-        // Attack: 4 voice frames -> Speaking
-        for _ in 0..3 {
+        // Attack: 6 voice frames -> Speaking
+        for _ in 0..5 {
             assert_eq!(sm.update(0.9, 0.5), None);
         }
         assert_eq!(sm.update(0.9, 0.5), Some(VoiceState::Speaking));

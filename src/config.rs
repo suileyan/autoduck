@@ -49,7 +49,7 @@ impl Default for AppConfig {
                 "WINWORD.EXE".into(),
             ],
             vad_threshold: 0.5,
-            attack_frames: 4,
+            attack_frames: 6,
             release_frames: 30,
             duck_duration_ms: default_duck_duration_ms(),
             restore_duration_ms: default_restore_duration_ms(),
