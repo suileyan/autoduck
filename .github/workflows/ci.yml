@@ -1,0 +1,88 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked 2>&1
+
+  test:
+    name: Test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked 2>&1
+
+  release:
+    name: Build & Release
+    runs-on: windows-latest
+    needs: [check, test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release
+        run: cargo build --release --locked 2>&1
+
+      - name: Get version from tag
+        id: version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create release archive
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $exe = "target/release/autoduck.exe"
+          Compress-Archive -Path $exe -DestinationPath "autoduck-${version}-x86_64-pc-windows-msvc.zip"
+
+      - name: Generate release notes
+        id: notes
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $prerelease = $version -match "beta|alpha|rc|pre"
+          echo "PRERELEASE=$prerelease" >> $env:GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: AutoDuck ${{ steps.version.outputs.VERSION }}
+          prerelease: ${{ steps.notes.outputs.PRERELEASE == 'True' }}
+          files: |
+            autoduck-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.zip
+          body: |
+            ## AutoDuck ${{ steps.version.outputs.VERSION }}
+
+            麦克风人声自动降音量系统
+
+            ### 下载
+            - `autoduck-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.zip` — Windows x64 可执行文件
+
+            ### 使用方法
+            1. 解压 zip 文件
+            2. 运行 `autoduck.exe`
+            3. 程序以托盘图标后台运行，右键菜单可切换模式、开关自启、退出
+
+            ### 配置
+            配置文件位于 `%APPDATA%/AutoDuck/config.toml`，首次运行自动生成。
