@@ -19,6 +19,7 @@ pub enum GuiUpdate {
     AppList(Vec<(String, bool)>),
     ConfigReset(AppConfig),
     ShowSettings,
+    Quit,
 }
 
 pub struct GuiApp {
@@ -165,13 +166,9 @@ impl GuiApp {
             let _ = sender_refresh.send(GuiMessage::RefreshApps);
         });
 
-        // --- Handle window close: hide instead of quitting event loop ---
-        let win_close = window.as_weak();
-        window.on_window_closed(move || {
-            if let Some(win) = win_close.upgrade() {
-                let _ = win.hide();
-            }
-        });
+        // --- Intercept window close: hide instead of destroying ---
+        // This keeps the window alive (just hidden) so it can be shown again.
+        window.window().on_close_requested(|| slint::CloseRequestResponse::HideWindow);
 
         // --- Timer to poll for updates from main loop ---
         let win_timer = window.as_weak();
@@ -209,6 +206,10 @@ impl GuiApp {
                     }
                     GuiUpdate::ShowSettings => {
                         let _ = win.show();
+                    }
+                    GuiUpdate::Quit => {
+                        let _ = slint::quit_event_loop();
+                        return;
                     }
                 }
             }

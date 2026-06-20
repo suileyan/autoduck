@@ -189,7 +189,10 @@ fn main() -> anyhow::Result<()> {
                                 match GuiApp::new(&gui_config, gui_msg_tx, gui_update_rx) {
                                     Ok(gui) => {
                                         gui.show();
-                                        let _ = slint::run_event_loop();
+                                        // Use run_event_loop_until_quit so the event loop
+                                        // stays alive when the window is hidden (not destroyed),
+                                        // allowing the settings window to be reopened.
+                                        let _ = slint::run_event_loop_until_quit();
                                     }
                                     Err(e) => {
                                         eprintln!("创建设置窗口失败: {}", e);
@@ -254,6 +257,10 @@ fn main() -> anyhow::Result<()> {
     match tray_handle.join() {
         Ok(()) => {}
         Err(_) => eprintln!("托盘线程 join 失败"),
+    }
+    // 通知 GUI 线程退出事件循环
+    if gui_handle.is_some() {
+        let _ = gui_update_tx.send(GuiUpdate::Quit);
     }
     if let Some(h) = gui_handle {
         let _ = h.join();
