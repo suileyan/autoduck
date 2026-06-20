@@ -29,7 +29,9 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 crossbeam-channel = "0.5"
 anyhow = "1"
+png = "0.18"
 slint = "1"
 
 [build-dependencies]
 slint-build = "1"
+winres = "0.1"

@@ -5,3 +5,4 @@
 *.exp
 *.lib
 .cargo/
+.trae/

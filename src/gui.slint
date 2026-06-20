@@ -1,4 +1,4 @@
-import { Button, CheckBox, ComboBox, GroupBox, LineEdit, Slider, SpinBox, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, GroupBox, LineEdit, ScrollView, Slider, SpinBox, VerticalBox, HorizontalBox } from "std-widgets.slint";
 
 export struct AppEntry {
     name: string,
@@ -7,8 +7,10 @@ export struct AppEntry {
 
 export component SettingsWindow inherits Window {
     title: "AutoDuck 设置";
+    icon: @image-url("../icon.png");
     preferred-width: 480px;
     preferred-height: 620px;
+    min-height: 400px;
 
     // Callbacks - Rust code will connect to these
     callback apply-settings();
@@ -36,163 +38,169 @@ export component SettingsWindow inherits Window {
         padding: 16px;
         spacing: 12px;
 
-        // 降音模式
-        GroupBox {
-            title: "降音模式";
-            HorizontalBox {
-                ComboBox {
-                    model: ["全局降音", "应用排除"];
-                    current-value: duck-mode == "global" ? "全局降音" : "应用排除";
-                    selected(changed-value) => {
-                        if changed-value == "全局降音" {
-                            duck-mode = "global";
-                        } else {
-                            duck-mode = "apps";
+        ScrollView {
+            VerticalBox {
+                spacing: 12px;
+
+                // 降音模式
+                GroupBox {
+                    title: "降音模式";
+                    HorizontalBox {
+                        ComboBox {
+                            model: ["全局降音", "应用排除"];
+                            current-value: duck-mode == "global" ? "全局降音" : "应用排除";
+                            selected(changed-value) => {
+                                if changed-value == "全局降音" {
+                                    duck-mode = "global";
+                                } else {
+                                    duck-mode = "apps";
+                                }
+                            }
                         }
                     }
                 }
-            }
-        }
 
-        // 音量设置
-        GroupBox {
-            title: "音量设置";
-            VerticalBox {
-                spacing: 8px;
+                // 音量设置
+                GroupBox {
+                    title: "音量设置";
+                    VerticalBox {
+                        spacing: 8px;
 
-                HorizontalBox {
-                    Text { text: "降音比例:"; vertical-stretch: 0; min-width: 100px; }
-                    Slider {
-                        minimum: 0.0;
-                        maximum: 1.0;
-                        value: duck-ratio;
-                        changed(val) => { duck-ratio = val; }
-                    }
-                    Text { text: round(duck-ratio * 100) + "%"; min-width: 50px; vertical-stretch: 0; }
-                }
+                        HorizontalBox {
+                            Text { text: "降音比例:"; vertical-stretch: 0; min-width: 100px; }
+                            Slider {
+                                minimum: 0.0;
+                                maximum: 1.0;
+                                value: duck-ratio;
+                                changed(val) => { duck-ratio = val; }
+                            }
+                            Text { text: round(duck-ratio * 100) + "%"; min-width: 50px; vertical-stretch: 0; }
+                        }
 
-                HorizontalBox {
-                    Text { text: "降音渐变:"; vertical-stretch: 0; min-width: 100px; }
-                    Slider {
-                        minimum: 50;
-                        maximum: 500;
-                        value: duck-duration-ms;
-                        changed(val) => { duck-duration-ms = round(val); }
-                    }
-                    Text { text: duck-duration-ms + "ms"; min-width: 50px; vertical-stretch: 0; }
-                }
+                        HorizontalBox {
+                            Text { text: "降音渐变:"; vertical-stretch: 0; min-width: 100px; }
+                            Slider {
+                                minimum: 50;
+                                maximum: 500;
+                                value: duck-duration-ms;
+                                changed(val) => { duck-duration-ms = round(val); }
+                            }
+                            Text { text: duck-duration-ms + "ms"; min-width: 50px; vertical-stretch: 0; }
+                        }
 
-                HorizontalBox {
-                    Text { text: "恢复渐变:"; vertical-stretch: 0; min-width: 100px; }
-                    Slider {
-                        minimum: 50;
-                        maximum: 500;
-                        value: restore-duration-ms;
-                        changed(val) => { restore-duration-ms = round(val); }
-                    }
-                    Text { text: restore-duration-ms + "ms"; min-width: 50px; vertical-stretch: 0; }
-                }
-            }
-        }
-
-        // VAD 设置
-        GroupBox {
-            title: "语音检测";
-            VerticalBox {
-                spacing: 8px;
-
-                HorizontalBox {
-                    Text { text: "灵敏度:"; vertical-stretch: 0; min-width: 100px; }
-                    Slider {
-                        minimum: 0.1;
-                        maximum: 0.9;
-                        value: vad-threshold;
-                        changed(val) => { vad-threshold = val; }
-                    }
-                    Text { text: round(vad-threshold * 100) + "%"; min-width: 50px; vertical-stretch: 0; }
-                }
-
-                HorizontalBox {
-                    Text { text: "触发帧数:"; vertical-stretch: 0; min-width: 100px; }
-                    SpinBox {
-                        value: attack-frames;
-                        minimum: 1;
-                        maximum: 20;
-                        edited(val) => { attack-frames = val; }
-                    }
-                    Text { text: "(" + attack-frames * 16 + "ms)"; vertical-stretch: 0; }
-                }
-
-                HorizontalBox {
-                    Text { text: "释放帧数:"; vertical-stretch: 0; min-width: 100px; }
-                    SpinBox {
-                        value: release-frames;
-                        minimum: 5;
-                        maximum: 100;
-                        edited(val) => { release-frames = val; }
-                    }
-                    Text { text: "(" + release-frames * 16 + "ms)"; vertical-stretch: 0; }
-                }
-
-                HorizontalBox {
-                    Text { text: "频谱平坦度:"; vertical-stretch: 0; min-width: 100px; }
-                    Slider {
-                        minimum: 0.0;
-                        maximum: 1.0;
-                        value: spectral-flatness-threshold;
-                        changed(val) => { spectral-flatness-threshold = val; }
-                    }
-                    Text { text: round(spectral-flatness-threshold * 100) + "%"; min-width: 50px; vertical-stretch: 0; }
-                }
-
-                HorizontalBox {
-                    Text { text: "噪声倍率:"; vertical-stretch: 0; min-width: 100px; }
-                    Slider {
-                        minimum: 1.0;
-                        maximum: 5.0;
-                        value: noise-floor-multiplier;
-                        changed(val) => { noise-floor-multiplier = val; }
-                    }
-                    Text { text: round(noise-floor-multiplier * 10) / 10; min-width: 50px; vertical-stretch: 0; }
-                }
-            }
-        }
-
-        // 应用排除列表
-        GroupBox {
-            title: "排除应用";
-            VerticalBox {
-                spacing: 8px;
-
-                HorizontalBox {
-                    LineEdit {
-                        placeholder-text: "输入进程名 (如 Music.exe)";
-                        text: new-app-name;
-                        edited(val) => { new-app-name = val; }
-                    }
-                    Button {
-                        text: "添加";
-                        clicked => {
-                            add-excluded-app(new-app-name);
-                            new-app-name = "";
+                        HorizontalBox {
+                            Text { text: "恢复渐变:"; vertical-stretch: 0; min-width: 100px; }
+                            Slider {
+                                minimum: 50;
+                                maximum: 500;
+                                value: restore-duration-ms;
+                                changed(val) => { restore-duration-ms = round(val); }
+                            }
+                            Text { text: restore-duration-ms + "ms"; min-width: 50px; vertical-stretch: 0; }
                         }
                     }
-                    Button {
-                        text: "刷新";
-                        clicked => { refresh-apps(); }
+                }
+
+                // VAD 设置
+                GroupBox {
+                    title: "语音检测";
+                    VerticalBox {
+                        spacing: 8px;
+
+                        HorizontalBox {
+                            Text { text: "灵敏度:"; vertical-stretch: 0; min-width: 100px; }
+                            Slider {
+                                minimum: 0.1;
+                                maximum: 0.9;
+                                value: vad-threshold;
+                                changed(val) => { vad-threshold = val; }
+                            }
+                            Text { text: round(vad-threshold * 100) + "%"; min-width: 50px; vertical-stretch: 0; }
+                        }
+
+                        HorizontalBox {
+                            Text { text: "触发帧数:"; vertical-stretch: 0; min-width: 100px; }
+                            SpinBox {
+                                value: attack-frames;
+                                minimum: 1;
+                                maximum: 20;
+                                edited(val) => { attack-frames = val; }
+                            }
+                            Text { text: "(" + attack-frames * 16 + "ms)"; vertical-stretch: 0; }
+                        }
+
+                        HorizontalBox {
+                            Text { text: "释放帧数:"; vertical-stretch: 0; min-width: 100px; }
+                            SpinBox {
+                                value: release-frames;
+                                minimum: 5;
+                                maximum: 100;
+                                edited(val) => { release-frames = val; }
+                            }
+                            Text { text: "(" + release-frames * 16 + "ms)"; vertical-stretch: 0; }
+                        }
+
+                        HorizontalBox {
+                            Text { text: "频谱平坦度:"; vertical-stretch: 0; min-width: 100px; }
+                            Slider {
+                                minimum: 0.0;
+                                maximum: 1.0;
+                                value: spectral-flatness-threshold;
+                                changed(val) => { spectral-flatness-threshold = val; }
+                            }
+                            Text { text: round(spectral-flatness-threshold * 100) + "%"; min-width: 50px; vertical-stretch: 0; }
+                        }
+
+                        HorizontalBox {
+                            Text { text: "噪声倍率:"; vertical-stretch: 0; min-width: 100px; }
+                            Slider {
+                                minimum: 1.0;
+                                maximum: 5.0;
+                                value: noise-floor-multiplier;
+                                changed(val) => { noise-floor-multiplier = val; }
+                            }
+                            Text { text: round(noise-floor-multiplier * 10) / 10; min-width: 50px; vertical-stretch: 0; }
+                        }
                     }
                 }
 
-                // App list with checkboxes
-                for entry[idx] in app-list: HorizontalBox {
-                    CheckBox {
-                        text: entry.name;
-                        checked: entry.excluded;
-                        toggled => {
-                            if self.checked {
-                                add-excluded-app(entry.name);
-                            } else {
-                                remove-excluded-app(entry.name);
+                // 应用排除列表
+                GroupBox {
+                    title: "排除应用";
+                    VerticalBox {
+                        spacing: 8px;
+
+                        HorizontalBox {
+                            LineEdit {
+                                placeholder-text: "输入进程名 (如 Music.exe)";
+                                text: new-app-name;
+                                edited(val) => { new-app-name = val; }
+                            }
+                            Button {
+                                text: "添加";
+                                clicked => {
+                                    add-excluded-app(new-app-name);
+                                    new-app-name = "";
+                                }
+                            }
+                            Button {
+                                text: "刷新";
+                                clicked => { refresh-apps(); }
+                            }
+                        }
+
+                        // App list with checkboxes
+                        for entry[idx] in app-list: HorizontalBox {
+                            CheckBox {
+                                text: entry.name;
+                                checked: entry.excluded;
+                                toggled => {
+                                    if self.checked {
+                                        add-excluded-app(entry.name);
+                                    } else {
+                                        remove-excluded-app(entry.name);
+                                    }
+                                }
                             }
                         }
                     }

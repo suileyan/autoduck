@@ -43,9 +43,14 @@ impl TrayApp {
         mode: DuckMode,
         auto_start: bool,
     ) -> Result<Self> {
-        // Create a simple 16x16 blue icon
-        let rgba = vec![0u8, 120, 215, 255].repeat(16 * 16);
-        let icon = Icon::from_rgba(rgba, 16, 16)?;
+        // Load icon from embedded PNG
+        let icon_bytes = include_bytes!("../icon.png");
+        let decoder = png::Decoder::new(std::io::Cursor::new(icon_bytes));
+        let mut reader = decoder.read_info()?;
+        let buf_size = reader.output_buffer_size().unwrap_or(0);
+        let mut buf = vec![0u8; buf_size];
+        let info = reader.next_frame(&mut buf)?;
+        let icon = Icon::from_rgba(buf, info.width, info.height)?;
 
         let menu = Self::build_menu_inner(mode, auto_start);
 
