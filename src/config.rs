@@ -82,4 +82,17 @@ impl AppConfig {
     pub fn config_file_path() -> PathBuf {
         Self::config_dir().join("config.toml")
     }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let tmp_path = path.with_extension("toml.tmp");
+        let content = toml::to_string_pretty(self)?;
+        std::fs::write(&tmp_path, &content)?;
+        std::fs::rename(&tmp_path, path)?;
+        Ok(())
+    }
+}
+
+/// Validate process name: only allow alphanumeric, underscore, dot, hyphen
+pub fn validate_process_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '-')
 }
