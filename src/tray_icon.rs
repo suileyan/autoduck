@@ -14,6 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const ID_MODE_GLOBAL: &str = "mode_global";
 const ID_MODE_APPS: &str = "mode_apps";
 const ID_AUTO_START: &str = "auto_start";
+const ID_SETTINGS: &str = "settings";
 const ID_QUIT: &str = "quit";
 
 #[derive(Debug, Clone)]
@@ -21,6 +22,7 @@ pub enum TrayEvent {
     Quit,
     ToggleMode(DuckMode),
     ToggleAutoStart(bool),
+    OpenSettings,
 }
 
 #[allow(dead_code)]
@@ -86,6 +88,12 @@ impl TrayApp {
             .checked(auto_start)
             .build();
 
+        let settings_item = MenuItemBuilder::new()
+            .id(MenuId::new(ID_SETTINGS))
+            .text("设置")
+            .enabled(true)
+            .build();
+
         let quit_item = MenuItemBuilder::new()
             .id(MenuId::new(ID_QUIT))
             .text("退出")
@@ -112,6 +120,8 @@ impl TrayApp {
             .expect("failed to append auto_start item");
         menu.append(&PredefinedMenuItem::separator())
             .expect("failed to append separator");
+        menu.append(&settings_item)
+            .expect("failed to append settings item");
         menu.append(&quit_item)
             .expect("failed to append quit item");
 
@@ -147,6 +157,8 @@ impl TrayApp {
             let _ = self
                 .event_sender
                 .send(TrayEvent::ToggleAutoStart(!self.auto_start_enabled));
+        } else if event.id == MenuId::new(ID_SETTINGS) {
+            let _ = self.event_sender.send(TrayEvent::OpenSettings);
         } else if event.id == MenuId::new(ID_QUIT) {
             let _ = self.event_sender.send(TrayEvent::Quit);
         }

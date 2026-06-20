@@ -3,6 +3,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use anyhow::Result;
 use crossbeam_channel::RecvTimeoutError;
 
+use crate::config::AppConfig;
 use crate::volume_control::VolumeController;
 
 /// Commands sent to the volume worker thread.
@@ -10,6 +11,7 @@ pub enum VolumeCommand {
     Duck,
     Restore,
     Stop,
+    UpdateConfig(AppConfig),
 }
 
 /// Volume control worker that runs on its own thread.
@@ -69,6 +71,22 @@ impl VolumeWorker {
                 }
                 Ok(VolumeCommand::Stop) => {
                     break;
+                }
+                Ok(VolumeCommand::UpdateConfig(config)) => {
+                    match VolumeController::new(
+                        config.duck_mode,
+                        config.excluded_apps.clone(),
+                        config.duck_duration_ms,
+                        config.restore_duration_ms,
+                    ) {
+                        Ok(new_controller) => {
+                            self.controller = new_controller;
+                            self.duck_ratio = config.duck_ratio;
+                        }
+                        Err(e) => {
+                            eprintln!("更新配置时创建 VolumeController 失败: {}", e);
+                        }
+                    }
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     // Periodic session refresh (meaningful for Mode B, no-op for Mode A)

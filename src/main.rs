@@ -18,6 +18,7 @@ use earshot::Detector;
 
 use config::AppConfig;
 use config::DuckMode;
+use gui::{GuiApp, GuiMessage, GuiUpdate};
 use tray_icon::TrayEvent;
 use vad_state::{VadStateMachine, VoiceState};
 use volume_control::VolumeController;
@@ -29,13 +30,15 @@ fn main() -> anyhow::Result<()> {
 
     // 2. 加载配置
     let config_path = AppConfig::config_file_path();
-    let config = AppConfig::load(&config_path)?;
+    let mut config = AppConfig::load(&config_path)?;
 
     // 3. 创建通道
     let (volume_cmd_tx, volume_cmd_rx) = unbounded::<VolumeCommand>();
     let (tray_event_tx, tray_event_rx) = unbounded::<TrayEvent>();
     let (vad_state_tx, vad_state_rx) = bounded::<VoiceState>(4);
     let (crash_tx, crash_rx) = bounded::<String>(2);
+    let (gui_msg_tx, gui_msg_rx) = unbounded::<GuiMessage>();
+    let (gui_update_tx, gui_update_rx) = unbounded::<GuiUpdate>();
 
     // 4. 启动音量控制线程
     let volume_controller = VolumeController::new(config.duck_mode, config.excluded_apps.clone(), config.duck_duration_ms, config.restore_duration_ms)?;
@@ -99,8 +102,9 @@ fn main() -> anyhow::Result<()> {
             }
         })?;
 
-    // 7. 主事件循环：监听 VAD 状态变化、托盘事件、崩溃通知
+    // 7. 主事件循环：监听 VAD 状态变化、托盘事件、GUI 消息、崩溃通知
     let mut current_voice_state = VoiceState::Silent;
+    let mut gui_handle: Option<std::thread::JoinHandle<()>> = None;
 
     loop {
         // 检查崩溃通知
@@ -139,8 +143,11 @@ fn main() -> anyhow::Result<()> {
                     break;
                 }
                 TrayEvent::ToggleMode(mode) => {
-                    // TODO: 重新创建 VolumeController 并重启音量控制线程
-                    eprintln!("切换降音模式为: {:?}（需要重启生效）", mode);
+                    config.duck_mode = mode;
+                    if let Err(e) = config.save(&config_path) {
+                        eprintln!("保存配置失败: {}", e);
+                    }
+                    let _ = volume_cmd_tx.send(VolumeCommand::UpdateConfig(config.clone()));
                 }
                 TrayEvent::ToggleAutoStart(enable) => {
                     if enable {
@@ -152,6 +159,58 @@ fn main() -> anyhow::Result<()> {
                             eprintln!("禁用开机自启失败: {}", e);
                         }
                     }
+                }
+                TrayEvent::OpenSettings => {
+                    // Launch GUI thread if not already running
+                    let gui_still_running = gui_handle.as_ref().map_or(false, |h| !h.is_finished());
+                    if !gui_still_running {
+                        let gui_config = config.clone();
+                        let gui_msg_tx = gui_msg_tx.clone();
+                        let gui_update_rx = gui_update_rx.clone();
+                        let handle = std::thread::Builder::new()
+                            .name("gui".into())
+                            .spawn(move || {
+                                match GuiApp::new(&gui_config, gui_msg_tx, gui_update_rx) {
+                                    Ok(gui) => {
+                                        gui.show();
+                                        slint::run_event_loop().unwrap();
+                                    }
+                                    Err(e) => {
+                                        eprintln!("创建设置窗口失败: {}", e);
+                                    }
+                                }
+                            });
+                        if let Ok(h) = handle {
+                            gui_handle = Some(h);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 处理 GUI 消息
+        if let Ok(msg) = gui_msg_rx.try_recv() {
+            match msg {
+                GuiMessage::ConfigChanged(new_config) => {
+                    // Save config
+                    if let Err(e) = new_config.save(&config_path) {
+                        eprintln!("保存配置失败: {}", e);
+                    }
+                    // Update running config
+                    config = new_config.clone();
+                    // Notify volume worker
+                    let _ = volume_cmd_tx.send(VolumeCommand::UpdateConfig(new_config));
+                }
+                GuiMessage::RefreshApps => {
+                    // Enumerate audio sessions
+                    let session_names = volume_control::enumerate_audio_session_names();
+                    // Build app list: (name, is_excluded)
+                    let apps: Vec<(String, bool)> = session_names.into_iter().map(|name| {
+                        let excluded = config.excluded_apps.contains(&name);
+                        (name, excluded)
+                    }).collect();
+                    // Send to GUI thread
+                    let _ = gui_update_tx.send(GuiUpdate::AppList(apps));
                 }
             }
         }
@@ -165,6 +224,9 @@ fn main() -> anyhow::Result<()> {
     let _ = vad_handle.join();
     let _ = volume_handle.join();
     let _ = tray_handle.join();
+    if let Some(h) = gui_handle {
+        let _ = h.join();
+    }
 
     Ok(())
 }
