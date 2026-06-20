@@ -24,6 +24,14 @@ use vad_state::{VadStateMachine, VoiceState};
 use volume_control::VolumeController;
 use volume_worker::{VolumeCommand, VolumeWorker};
 
+enum VadCommand {
+    UpdateParams {
+        threshold: f32,
+        attack_frames: u32,
+        release_frames: u32,
+    },
+}
+
 fn main() -> anyhow::Result<()> {
     // 1. 单实例锁
     let _single_instance = single_instance::SingleInstance::new()?;
@@ -39,6 +47,7 @@ fn main() -> anyhow::Result<()> {
     let (crash_tx, crash_rx) = bounded::<String>(2);
     let (gui_msg_tx, gui_msg_rx) = unbounded::<GuiMessage>();
     let (gui_update_tx, gui_update_rx) = unbounded::<GuiUpdate>();
+    let (vad_cmd_tx, vad_cmd_rx) = unbounded::<VadCommand>();
 
     // 4. 启动音量控制线程
     let volume_controller = VolumeController::new(config.duck_mode, config.excluded_apps.clone(), config.duck_duration_ms, config.restore_duration_ms)?;
@@ -72,6 +81,7 @@ fn main() -> anyhow::Result<()> {
                     release_frames,
                     vad_state_tx,
                     volume_cmd_tx_clone,
+                    vad_cmd_rx,
                 );
             }));
 
@@ -206,7 +216,13 @@ fn main() -> anyhow::Result<()> {
                     // Update running config
                     config = new_config.clone();
                     // Notify volume worker
-                    let _ = volume_cmd_tx.send(VolumeCommand::UpdateConfig(new_config));
+                    let _ = volume_cmd_tx.send(VolumeCommand::UpdateConfig(new_config.clone()));
+                    // Update VAD parameters
+                    let _ = vad_cmd_tx.send(VadCommand::UpdateParams {
+                        threshold: new_config.vad_threshold,
+                        attack_frames: new_config.attack_frames,
+                        release_frames: new_config.release_frames,
+                    });
                 }
                 GuiMessage::RefreshApps => {
                     // Enumerate audio sessions
@@ -244,11 +260,12 @@ fn main() -> anyhow::Result<()> {
 
 fn run_vad_loop(
     running: Arc<AtomicBool>,
-    threshold: f32,
-    attack_frames: u32,
-    release_frames: u32,
+    mut threshold: f32,
+    initial_attack_frames: u32,
+    initial_release_frames: u32,
     vad_state_tx: Sender<VoiceState>,
     _volume_cmd_tx: Sender<VolumeCommand>,
+    vad_cmd_rx: crossbeam_channel::Receiver<VadCommand>,
 ) {
     let (producer, consumer) = audio_capture::AudioCapture::create_ring_buffer();
 
@@ -264,9 +281,20 @@ fn run_vad_loop(
     let mut frame_reader = audio_capture::FrameReader::new(consumer, native_sample_rate);
 
     let mut detector = Detector::default();
-    let mut state_machine = VadStateMachine::new(attack_frames, release_frames);
+    let mut state_machine = VadStateMachine::new(initial_attack_frames, initial_release_frames);
 
     while running.load(Ordering::Relaxed) {
+        // Check for parameter updates
+        while let Ok(cmd) = vad_cmd_rx.try_recv() {
+            match cmd {
+                VadCommand::UpdateParams { threshold: new_threshold, attack_frames, release_frames } => {
+                    threshold = new_threshold;
+                    state_machine.set_attack_frames(attack_frames);
+                    state_machine.set_release_frames(release_frames);
+                }
+            }
+        }
+
         if let Some(frame) = frame_reader.next_frame() {
             // earshot 需要精确 256 个 i16 采样
             let frame_i16: Vec<i16> = frame

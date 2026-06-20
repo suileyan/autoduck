@@ -37,6 +37,14 @@ impl VadStateMachine {
         }
     }
 
+    pub fn set_attack_frames(&mut self, frames: u32) {
+        self.attack_frames = frames;
+    }
+
+    pub fn set_release_frames(&mut self, frames: u32) {
+        self.release_frames = frames;
+    }
+
     /// Updates the state machine with a new VAD score and threshold.
     ///
     /// Returns `Some(VoiceState)` when a state transition occurs,
