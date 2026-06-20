@@ -18,6 +18,7 @@ pub enum GuiMessage {
 pub enum GuiUpdate {
     AppList(Vec<(String, bool)>),
     ConfigReset(AppConfig),
+    ShowSettings,
 }
 
 pub struct GuiApp {
@@ -164,9 +165,12 @@ impl GuiApp {
             let _ = sender_refresh.send(GuiMessage::RefreshApps);
         });
 
-        // --- Handle window close: quit the slint event loop ---
-        window.on_window_closed(|| {
-            let _ = slint::quit_event_loop();
+        // --- Handle window close: hide instead of quitting event loop ---
+        let win_close = window.as_weak();
+        window.on_window_closed(move || {
+            if let Some(win) = win_close.upgrade() {
+                let _ = win.hide();
+            }
         });
 
         // --- Timer to poll for updates from main loop ---
@@ -175,13 +179,9 @@ impl GuiApp {
         timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(100), move || {
             let win = match win_timer.upgrade() {
                 Some(w) => w,
-                None => {
-                    // Window was dropped, quit the event loop
-                    let _ = slint::quit_event_loop();
-                    return;
-                }
+                None => return,
             };
-            if let Ok(update) = update_rx.try_recv() {
+            while let Ok(update) = update_rx.try_recv() {
                 match update {
                     GuiUpdate::AppList(apps) => {
                         let entries: Vec<AppEntry> = apps
@@ -206,6 +206,9 @@ impl GuiApp {
                         win.set_restore_duration_ms(config.restore_duration_ms as i32);
                         win.set_spectral_flatness_threshold(config.spectral_flatness_threshold);
                         win.set_noise_floor_multiplier(config.noise_floor_multiplier);
+                    }
+                    GuiUpdate::ShowSettings => {
+                        let _ = win.show();
                     }
                 }
             }

@@ -178,21 +178,14 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 TrayEvent::OpenSettings => {
-                    // 清理已结束的 GUI 线程
-                    if gui_handle.as_ref().map_or(false, |h| h.is_finished()) {
-                        if let Some(h) = gui_handle.take() {
-                            let _ = h.join();
-                        }
-                    }
-                    // Launch GUI thread if not already running
                     if gui_handle.is_none() {
+                        // First time: create GUI thread
                         let gui_config = config.clone();
                         let gui_msg_tx = gui_msg_tx.clone();
                         let gui_update_rx = gui_update_rx.clone();
                         let handle = std::thread::Builder::new()
                             .name("gui".into())
                             .spawn(move || {
-                                // run_event_loop() 默认在最后一个窗口关闭时退出
                                 match GuiApp::new(&gui_config, gui_msg_tx, gui_update_rx) {
                                     Ok(gui) => {
                                         gui.show();
@@ -206,6 +199,9 @@ fn main() -> anyhow::Result<()> {
                         if let Ok(h) = handle {
                             gui_handle = Some(h);
                         }
+                    } else {
+                        // GUI thread already running, just show the window
+                        let _ = gui_update_tx.send(GuiUpdate::ShowSettings);
                     }
                 }
             }
