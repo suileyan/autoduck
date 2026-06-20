@@ -369,6 +369,64 @@ fn set_volume_gradual_session(
     }
 }
 
+/// Enumerate current audio session process names (uppercase).
+/// This is a standalone function that initializes its own COM.
+pub fn enumerate_audio_session_names() -> Vec<String> {
+    let mut result = Vec::new();
+
+    unsafe {
+        // Initialize COM for this call
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+
+        let enumerator: IMMDeviceEnumerator = match CoCreateInstance(
+            &MMDeviceEnumerator,
+            None,
+            CLSCTX_ALL,
+        ) {
+            Ok(e) => e,
+            Err(_) => return result,
+        };
+
+        let device: IMMDevice = match enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
+            Ok(d) => d,
+            Err(_) => return result,
+        };
+
+        let session_manager: IAudioSessionManager2 = match device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
+            Ok(s) => s,
+            Err(_) => return result,
+        };
+
+        let session_enumerator = match session_manager.GetSessionEnumerator() {
+            Ok(e) => e,
+            Err(_) => return result,
+        };
+
+        let count = match session_enumerator.GetCount() {
+            Ok(c) => c,
+            Err(_) => return result,
+        };
+
+        for i in 0..count {
+            if let Ok(control) = session_enumerator.GetSession(i) {
+                if let Ok(control2) = control.cast::<IAudioSessionControl2>() {
+                    if let Ok(pid) = control2.GetProcessId() {
+                        if pid != 0 {
+                            if let Some(name) = get_process_name(pid) {
+                                if !result.contains(&name) {
+                                    result.push(name);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
 /// Get the process executable name (uppercase) from a PID.
 fn get_process_name(pid: u32) -> Option<String> {
     unsafe {
