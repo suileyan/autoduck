@@ -1,0 +1,200 @@
+import { Button, CheckBox, ComboBox, GroupBox, LineEdit, Slider, SpinBox, VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+export struct AppEntry {
+    name: string,
+    excluded: bool,
+}
+
+export component SettingsWindow inherits Window {
+    title: "AutoDuck 设置";
+    preferred-width: 480px;
+    preferred-height: 620px;
+
+    // Callbacks - Rust code will connect to these
+    callback apply-settings();
+    callback reset-settings();
+    callback add-excluded-app(string);
+    callback remove-excluded-app(string);
+    callback refresh-apps();
+
+    // Properties that Rust code will set
+    in-out property <string> duck-mode: "global";
+    in-out property <float> duck-ratio: 0.3;
+    in-out property <float> vad-threshold: 0.5;
+    in-out property <int> attack-frames: 4;
+    in-out property <int> release-frames: 30;
+    in-out property <int> duck-duration-ms: 120;
+    in-out property <int> restore-duration-ms: 120;
+    in-out property <[AppEntry]> app-list: [];
+    in-out property <string> new-app-name: "";
+    in-out property <string> status-text: "";
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 12px;
+
+        // 降音模式
+        GroupBox {
+            title: "降音模式";
+            HorizontalBox {
+                ComboBox {
+                    model: ["全局降音", "应用排除"];
+                    current-value: duck-mode == "global" ? "全局降音" : "应用排除";
+                    selected(changed-value) => {
+                        if changed-value == "全局降音" {
+                            duck-mode = "global";
+                        } else {
+                            duck-mode = "apps";
+                        }
+                    }
+                }
+            }
+        }
+
+        // 音量设置
+        GroupBox {
+            title: "音量设置";
+            VerticalBox {
+                spacing: 8px;
+
+                HorizontalBox {
+                    Text { text: "降音比例:"; vertical-stretch: 0; min-width: 100px; }
+                    Slider {
+                        minimum: 0.0;
+                        maximum: 1.0;
+                        value: duck-ratio;
+                        changed(val) => { duck-ratio = val; }
+                    }
+                    Text { text: round(duck-ratio * 100) + "%"; min-width: 50px; vertical-stretch: 0; }
+                }
+
+                HorizontalBox {
+                    Text { text: "降音渐变:"; vertical-stretch: 0; min-width: 100px; }
+                    Slider {
+                        minimum: 50;
+                        maximum: 500;
+                        value: duck-duration-ms;
+                        changed(val) => { duck-duration-ms = round(val); }
+                    }
+                    Text { text: duck-duration-ms + "ms"; min-width: 50px; vertical-stretch: 0; }
+                }
+
+                HorizontalBox {
+                    Text { text: "恢复渐变:"; vertical-stretch: 0; min-width: 100px; }
+                    Slider {
+                        minimum: 50;
+                        maximum: 500;
+                        value: restore-duration-ms;
+                        changed(val) => { restore-duration-ms = round(val); }
+                    }
+                    Text { text: restore-duration-ms + "ms"; min-width: 50px; vertical-stretch: 0; }
+                }
+            }
+        }
+
+        // VAD 设置
+        GroupBox {
+            title: "语音检测";
+            VerticalBox {
+                spacing: 8px;
+
+                HorizontalBox {
+                    Text { text: "灵敏度:"; vertical-stretch: 0; min-width: 100px; }
+                    Slider {
+                        minimum: 0.1;
+                        maximum: 0.9;
+                        value: vad-threshold;
+                        changed(val) => { vad-threshold = val; }
+                    }
+                    Text { text: round(vad-threshold * 100) + "%"; min-width: 50px; vertical-stretch: 0; }
+                }
+
+                HorizontalBox {
+                    Text { text: "触发帧数:"; vertical-stretch: 0; min-width: 100px; }
+                    SpinBox {
+                        value: attack-frames;
+                        minimum: 1;
+                        maximum: 20;
+                        edited(val) => { attack-frames = val; }
+                    }
+                    Text { text: "(" + attack-frames * 16 + "ms)"; vertical-stretch: 0; }
+                }
+
+                HorizontalBox {
+                    Text { text: "释放帧数:"; vertical-stretch: 0; min-width: 100px; }
+                    SpinBox {
+                        value: release-frames;
+                        minimum: 5;
+                        maximum: 100;
+                        edited(val) => { release-frames = val; }
+                    }
+                    Text { text: "(" + release-frames * 16 + "ms)"; vertical-stretch: 0; }
+                }
+            }
+        }
+
+        // 应用排除列表
+        GroupBox {
+            title: "排除应用";
+            VerticalBox {
+                spacing: 8px;
+
+                HorizontalBox {
+                    LineEdit {
+                        placeholder-text: "输入进程名 (如 Music.exe)";
+                        text: new-app-name;
+                        edited(val) => { new-app-name = val; }
+                    }
+                    Button {
+                        text: "添加";
+                        clicked => {
+                            add-excluded-app(new-app-name);
+                            new-app-name = "";
+                        }
+                    }
+                    Button {
+                        text: "刷新";
+                        clicked => { refresh-apps(); }
+                    }
+                }
+
+                // App list with checkboxes
+                for entry[idx] in app-list: HorizontalBox {
+                    CheckBox {
+                        text: entry.name;
+                        checked: entry.excluded;
+                        toggled => {
+                            if self.checked {
+                                add-excluded-app(entry.name);
+                            } else {
+                                remove-excluded-app(entry.name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 底部按钮
+        HorizontalBox {
+            alignment: end;
+            spacing: 8px;
+
+            Text {
+                text: status-text;
+                vertical-alignment: center;
+                color: #666666;
+            }
+
+            Button {
+                text: "重置默认";
+                clicked => { reset-settings(); }
+            }
+            Button {
+                text: "应用";
+                primary: true;
+                clicked => { apply-settings(); }
+            }
+        }
+    }
+}

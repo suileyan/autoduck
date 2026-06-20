@@ -3,6 +3,7 @@
 mod audio_capture;
 mod autostart;
 mod config;
+mod gui;
 mod single_instance;
 mod tray_icon;
 mod vad_state;
