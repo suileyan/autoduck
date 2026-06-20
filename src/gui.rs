@@ -43,6 +43,8 @@ impl GuiApp {
         window.set_release_frames(config.release_frames as i32);
         window.set_duck_duration_ms(config.duck_duration_ms as i32);
         window.set_restore_duration_ms(config.restore_duration_ms as i32);
+        window.set_spectral_flatness_threshold(config.spectral_flatness_threshold);
+        window.set_noise_floor_multiplier(config.noise_floor_multiplier);
 
         // Set initial excluded apps
         let app_entries: Vec<AppEntry> = config
@@ -81,6 +83,8 @@ impl GuiApp {
             win.set_release_frames(default.release_frames as i32);
             win.set_duck_duration_ms(default.duck_duration_ms as i32);
             win.set_restore_duration_ms(default.restore_duration_ms as i32);
+            win.set_spectral_flatness_threshold(default.spectral_flatness_threshold);
+            win.set_noise_floor_multiplier(default.noise_floor_multiplier);
 
             // Reset the app list to default excluded apps
             let entries: Vec<AppEntry> = default
@@ -200,6 +204,8 @@ impl GuiApp {
                         win.set_release_frames(config.release_frames as i32);
                         win.set_duck_duration_ms(config.duck_duration_ms as i32);
                         win.set_restore_duration_ms(config.restore_duration_ms as i32);
+                        win.set_spectral_flatness_threshold(config.spectral_flatness_threshold);
+                        win.set_noise_floor_multiplier(config.noise_floor_multiplier);
                     }
                 }
             }
@@ -254,6 +260,8 @@ impl AppConfig {
             release_frames: win.get_release_frames() as u32,
             duck_duration_ms: win.get_duck_duration_ms() as u32,
             restore_duration_ms: win.get_restore_duration_ms() as u32,
+            spectral_flatness_threshold: win.get_spectral_flatness_threshold(),
+            noise_floor_multiplier: win.get_noise_floor_multiplier(),
         }
     }
 }

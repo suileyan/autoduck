@@ -8,6 +8,7 @@ cpal = "0.15"
 rtrb = "0.3"
 rubato = "0.16"
 earshot = "1"
+rustfft = "6"
 
 windows = { version = "0.59", features = [
     "Win32_Media_Audio",

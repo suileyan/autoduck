@@ -23,6 +23,14 @@ fn default_restore_duration_ms() -> u32 {
     120
 }
 
+fn default_spectral_flatness_threshold() -> f32 {
+    0.65
+}
+
+fn default_noise_floor_multiplier() -> f32 {
+    2.0
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AppConfig {
     pub duck_mode: DuckMode,
@@ -35,6 +43,10 @@ pub struct AppConfig {
     pub duck_duration_ms: u32,
     #[serde(default = "default_restore_duration_ms")]
     pub restore_duration_ms: u32,
+    #[serde(default = "default_spectral_flatness_threshold")]
+    pub spectral_flatness_threshold: f32,
+    #[serde(default = "default_noise_floor_multiplier")]
+    pub noise_floor_multiplier: f32,
 }
 
 impl Default for AppConfig {
@@ -53,6 +65,8 @@ impl Default for AppConfig {
             release_frames: 30,
             duck_duration_ms: default_duck_duration_ms(),
             restore_duration_ms: default_restore_duration_ms(),
+            spectral_flatness_threshold: default_spectral_flatness_threshold(),
+            noise_floor_multiplier: default_noise_floor_multiplier(),
         }
     }
 }

@@ -26,6 +26,8 @@ export component SettingsWindow inherits Window {
     in-out property <int> release-frames: 30;
     in-out property <int> duck-duration-ms: 120;
     in-out property <int> restore-duration-ms: 120;
+    in-out property <float> spectral-flatness-threshold: 0.65;
+    in-out property <float> noise-floor-multiplier: 2.0;
     in-out property <[AppEntry]> app-list: [];
     in-out property <string> new-app-name: "";
     in-out property <string> status-text: "";
@@ -130,6 +132,28 @@ export component SettingsWindow inherits Window {
                         edited(val) => { release-frames = val; }
                     }
                     Text { text: "(" + release-frames * 16 + "ms)"; vertical-stretch: 0; }
+                }
+
+                HorizontalBox {
+                    Text { text: "频谱平坦度:"; vertical-stretch: 0; min-width: 100px; }
+                    Slider {
+                        minimum: 0.0;
+                        maximum: 1.0;
+                        value: spectral-flatness-threshold;
+                        changed(val) => { spectral-flatness-threshold = val; }
+                    }
+                    Text { text: round(spectral-flatness-threshold * 100) + "%"; min-width: 50px; vertical-stretch: 0; }
+                }
+
+                HorizontalBox {
+                    Text { text: "噪声倍率:"; vertical-stretch: 0; min-width: 100px; }
+                    Slider {
+                        minimum: 1.0;
+                        maximum: 5.0;
+                        value: noise-floor-multiplier;
+                        changed(val) => { noise-floor-multiplier = val; }
+                    }
+                    Text { text: round(noise-floor-multiplier * 10) / 10; min-width: 50px; vertical-stretch: 0; }
                 }
             }
         }

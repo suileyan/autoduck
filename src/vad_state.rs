@@ -79,6 +79,114 @@ impl VadStateMachine {
     }
 }
 
+/// Tracks the noise floor using exponential moving average (EMA) of RMS values.
+/// Only updates during Silent state to avoid treating voice as noise.
+pub struct NoiseFloorTracker {
+    /// Current noise floor estimate (RMS)
+    noise_floor: f32,
+    /// EMA alpha (smoothing factor), typically 0.001-0.01
+    alpha: f32,
+}
+
+impl NoiseFloorTracker {
+    pub fn new(alpha: f32) -> Self {
+        Self {
+            noise_floor: 0.0,
+            alpha,
+        }
+    }
+
+    /// Update the noise floor with a new RMS value.
+    /// Should only be called when the current state is Silent.
+    pub fn update(&mut self, rms: f32) {
+        if self.noise_floor <= 0.0 {
+            // First measurement
+            self.noise_floor = rms;
+        } else {
+            // EMA update
+            self.noise_floor = self.alpha * rms + (1.0 - self.alpha) * self.noise_floor;
+        }
+    }
+
+    /// Get the effective threshold, which is the maximum of the user threshold
+    /// and the noise floor multiplied by the multiplier.
+    pub fn effective_threshold(&self, user_threshold: f32, multiplier: f32) -> f32 {
+        let noise_threshold = self.noise_floor * multiplier;
+        user_threshold.max(noise_threshold)
+    }
+
+    /// Get the current noise floor estimate
+    pub fn noise_floor(&self) -> f32 {
+        self.noise_floor
+    }
+}
+
+/// Compute spectral flatness of a frame.
+/// Returns a value in [0, 1] where 1 = white noise (flat spectrum), 0 = pure tone.
+/// Uses FFT to compute power spectrum, then geometric mean / arithmetic mean.
+pub fn spectral_flatness(frame: &[f32]) -> f32 {
+    use rustfft::{FftPlanner, num_complex::Complex};
+
+    let len = frame.len();
+    if len == 0 {
+        return 0.0;
+    }
+
+    // Apply Hann window to reduce spectral leakage
+    let windowed: Vec<f32> = frame
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| {
+            let w =
+                0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (len - 1) as f32).cos());
+            s * w
+        })
+        .collect();
+
+    // Prepare FFT input (zero-pad to next power of 2 if needed)
+    let fft_len = windowed.len().next_power_of_two();
+    let mut fft_input: Vec<Complex<f32>> =
+        windowed.iter().map(|&s| Complex::new(s, 0.0)).collect();
+    fft_input.resize(fft_len, Complex::new(0.0, 0.0));
+
+    let mut planner = FftPlanner::new();
+    let fft = planner.plan_fft_forward(fft_len);
+    fft.process(&mut fft_input);
+
+    // Compute power spectrum (only first half - positive frequencies)
+    let half_len = fft_len / 2;
+    let power: Vec<f32> = fft_input[..half_len]
+        .iter()
+        .map(|c| c.norm_sqr() / fft_len as f32)
+        .collect();
+
+    if power.is_empty() {
+        return 0.0;
+    }
+
+    // Arithmetic mean of power spectrum
+    let arith_mean: f32 = power.iter().sum::<f32>() / power.len() as f32;
+    if arith_mean <= f32::EPSILON {
+        return 0.0;
+    }
+
+    // Geometric mean of power spectrum (use log to avoid overflow)
+    let log_sum: f32 = power
+        .iter()
+        .map(|&p| {
+            if p > f32::EPSILON {
+                p.ln()
+            } else {
+                f32::MIN_POSITIVE.ln()
+            }
+        })
+        .sum();
+    let geo_mean = (log_sum / power.len() as f32).exp();
+
+    // Spectral flatness = geo_mean / arith_mean
+    (geo_mean / arith_mean).clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

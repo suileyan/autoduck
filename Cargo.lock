@@ -508,6 +508,7 @@ dependencies = [
  "muda 0.15.3",
  "rtrb",
  "rubato",
+ "rustfft",
  "serde",
  "slint",
  "slint-build",

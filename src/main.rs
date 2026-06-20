@@ -20,7 +20,7 @@ use config::AppConfig;
 use config::DuckMode;
 use gui::{GuiApp, GuiMessage, GuiUpdate};
 use tray_icon::TrayEvent;
-use vad_state::{VadStateMachine, VoiceState};
+use vad_state::{VadStateMachine, VoiceState, NoiseFloorTracker, spectral_flatness};
 use volume_control::VolumeController;
 use volume_worker::{VolumeCommand, VolumeWorker};
 
@@ -29,6 +29,8 @@ enum VadCommand {
         threshold: f32,
         attack_frames: u32,
         release_frames: u32,
+        spectral_flatness_threshold: f32,
+        noise_floor_multiplier: f32,
     },
 }
 
@@ -69,6 +71,8 @@ fn main() -> anyhow::Result<()> {
     let vad_threshold = config.vad_threshold;
     let attack_frames = config.attack_frames;
     let release_frames = config.release_frames;
+    let spectral_flatness_threshold = config.spectral_flatness_threshold;
+    let noise_floor_multiplier = config.noise_floor_multiplier;
 
     let vad_handle = std::thread::Builder::new()
         .name("vad-worker".into())
@@ -79,6 +83,8 @@ fn main() -> anyhow::Result<()> {
                     vad_threshold,
                     attack_frames,
                     release_frames,
+                    spectral_flatness_threshold,
+                    noise_floor_multiplier,
                     vad_state_tx,
                     volume_cmd_tx_clone,
                     vad_cmd_rx,
@@ -222,6 +228,8 @@ fn main() -> anyhow::Result<()> {
                         threshold: new_config.vad_threshold,
                         attack_frames: new_config.attack_frames,
                         release_frames: new_config.release_frames,
+                        spectral_flatness_threshold: new_config.spectral_flatness_threshold,
+                        noise_floor_multiplier: new_config.noise_floor_multiplier,
                     });
                 }
                 GuiMessage::RefreshApps => {
@@ -263,6 +271,8 @@ fn run_vad_loop(
     mut threshold: f32,
     initial_attack_frames: u32,
     initial_release_frames: u32,
+    mut spectral_flatness_threshold: f32,
+    mut noise_floor_multiplier: f32,
     vad_state_tx: Sender<VoiceState>,
     _volume_cmd_tx: Sender<VolumeCommand>,
     vad_cmd_rx: crossbeam_channel::Receiver<VadCommand>,
@@ -282,20 +292,41 @@ fn run_vad_loop(
 
     let mut detector = Detector::default();
     let mut state_machine = VadStateMachine::new(initial_attack_frames, initial_release_frames);
+    let mut noise_tracker = NoiseFloorTracker::new(0.005);
+    let mut current_state = VoiceState::Silent;
 
     while running.load(Ordering::Relaxed) {
         // Check for parameter updates
         while let Ok(cmd) = vad_cmd_rx.try_recv() {
             match cmd {
-                VadCommand::UpdateParams { threshold: new_threshold, attack_frames, release_frames } => {
+                VadCommand::UpdateParams {
+                    threshold: new_threshold,
+                    attack_frames,
+                    release_frames,
+                    spectral_flatness_threshold: new_sf_threshold,
+                    noise_floor_multiplier: new_nf_multiplier,
+                } => {
                     threshold = new_threshold;
                     state_machine.set_attack_frames(attack_frames);
                     state_machine.set_release_frames(release_frames);
+                    spectral_flatness_threshold = new_sf_threshold;
+                    noise_floor_multiplier = new_nf_multiplier;
                 }
             }
         }
 
         if let Some(frame) = frame_reader.next_frame() {
+            // Compute RMS for noise floor tracking
+            let rms = (frame.iter().map(|&s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
+
+            // Update noise floor during Silent state
+            if current_state == VoiceState::Silent {
+                noise_tracker.update(rms);
+            }
+
+            // Compute spectral flatness pre-filter
+            let sf = spectral_flatness(&frame);
+
             // earshot 需要精确 256 个 i16 采样
             let frame_i16: Vec<i16> = frame
                 .iter()
@@ -303,8 +334,18 @@ fn run_vad_loop(
                 .collect();
 
             if frame_i16.len() == 256 {
-                let score = detector.predict_i16(&frame_i16);
-                if let Some(new_state) = state_machine.update(score, threshold) {
+                let score = if sf > spectral_flatness_threshold {
+                    // Flat noise: skip earshot, treat as silence
+                    0.0
+                } else {
+                    detector.predict_i16(&frame_i16)
+                };
+
+                // Compute effective threshold with noise floor
+                let effective_threshold = noise_tracker.effective_threshold(threshold, noise_floor_multiplier);
+
+                if let Some(new_state) = state_machine.update(score, effective_threshold) {
+                    current_state = new_state;
                     let _ = vad_state_tx.send(new_state);
                 }
             }
