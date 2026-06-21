@@ -27,21 +27,27 @@ pub enum TrayEvent {
     OpenSettings,
 }
 
-#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub enum TrayUpdate {
+    Crashed,
+}
+
 pub struct TrayApp {
     tray_icon: TrayIcon,
     event_sender: Sender<TrayEvent>,
+    #[allow(dead_code)] // Used by rebuild_menu for future menu updates
     current_mode: DuckMode,
     auto_start_enabled: bool,
     crashed: bool,
+    update_rx: crossbeam_channel::Receiver<TrayUpdate>,
 }
 
-#[allow(dead_code)]
 impl TrayApp {
     pub fn new(
         event_sender: Sender<TrayEvent>,
         mode: DuckMode,
         auto_start: bool,
+        update_rx: crossbeam_channel::Receiver<TrayUpdate>,
     ) -> Result<Self> {
         // Load icon from embedded PNG
         let icon_bytes = include_bytes!("../icon.png");
@@ -66,9 +72,11 @@ impl TrayApp {
             current_mode: mode,
             auto_start_enabled: auto_start,
             crashed: false,
+            update_rx,
         })
     }
 
+    #[allow(dead_code)]
     pub fn build_menu(&self) -> Menu {
         Self::build_menu_inner(self.current_mode, self.auto_start_enabled)
     }
@@ -135,6 +143,7 @@ impl TrayApp {
         menu
     }
 
+    #[allow(dead_code)]
     fn rebuild_menu(&self) {
         let menu = self.build_menu();
         self.tray_icon.set_menu(Some(Box::new(menu)));
@@ -145,25 +154,29 @@ impl TrayApp {
         let _ = self.tray_icon.set_tooltip(Some("AutoDuck - 已停止工作"));
     }
 
+    #[allow(dead_code)]
     pub fn update_mode(&mut self, mode: DuckMode) {
         self.current_mode = mode;
         self.rebuild_menu();
     }
 
+    #[allow(dead_code)]
     pub fn update_auto_start(&mut self, enabled: bool) {
         self.auto_start_enabled = enabled;
         self.rebuild_menu();
     }
 
-    fn handle_menu_event(&self, event: muda::MenuEvent) {
+    fn handle_menu_event(&mut self, event: muda::MenuEvent) {
         if event.id == MenuId::new(ID_MODE_GLOBAL) {
             let _ = self.event_sender.send(TrayEvent::ToggleMode(DuckMode::Global));
         } else if event.id == MenuId::new(ID_MODE_APPS) {
             let _ = self.event_sender.send(TrayEvent::ToggleMode(DuckMode::Apps));
         } else if event.id == MenuId::new(ID_AUTO_START) {
+            let new_enabled = !self.auto_start_enabled;
+            self.auto_start_enabled = new_enabled;
             let _ = self
                 .event_sender
-                .send(TrayEvent::ToggleAutoStart(!self.auto_start_enabled));
+                .send(TrayEvent::ToggleAutoStart(new_enabled));
         } else if event.id == MenuId::new(ID_SETTINGS) {
             let _ = self.event_sender.send(TrayEvent::OpenSettings);
         } else if event.id == MenuId::new(ID_QUIT) {
@@ -177,8 +190,9 @@ pub fn run_tray(
     mode: DuckMode,
     auto_start: bool,
     running: Arc<AtomicBool>,
+    tray_update_rx: crossbeam_channel::Receiver<TrayUpdate>,
 ) -> Result<()> {
-    let app = TrayApp::new(event_sender, mode, auto_start)?;
+    let mut app = TrayApp::new(event_sender, mode, auto_start, tray_update_rx)?;
 
     while running.load(Ordering::Relaxed) {
         // Process Windows messages
@@ -193,6 +207,13 @@ pub fn run_tray(
         // Check for menu events
         if let Ok(event) = muda::MenuEvent::receiver().try_recv() {
             app.handle_menu_event(event);
+        }
+
+        // Check for tray updates from main loop
+        if let Ok(update) = app.update_rx.try_recv() {
+            match update {
+                TrayUpdate::Crashed => app.set_crashed(),
+            }
         }
 
         // Small sleep to avoid busy-waiting

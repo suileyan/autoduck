@@ -1,8 +1,3 @@
-// Dependencies needed in Cargo.toml:
-// anyhow = "1"
-// serde = { version = "1", features = ["derive"] }
-// toml = "0.8"
-
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -89,6 +84,27 @@ impl AppConfig {
     }
 
     pub fn config_dir() -> PathBuf {
+        // Prefer %APPDATA%\AutoDuck for writability
+        if let Some(data_dir) = dirs::data_dir() {
+            let app_dir = data_dir.join("AutoDuck");
+            if app_dir.exists() || std::fs::create_dir_all(&app_dir).is_ok() {
+                // Migrate config from old location (exe directory) if new location has no config
+                let new_config = app_dir.join("config.toml");
+                if !new_config.exists() {
+                    if let Some(exe_dir) = std::env::current_exe()
+                        .ok()
+                        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+                    {
+                        let old_config = exe_dir.join("config.toml");
+                        if old_config.exists() && std::fs::copy(&old_config, &new_config).is_ok() {
+                            let _ = std::fs::remove_file(&old_config);
+                        }
+                    }
+                }
+                return app_dir;
+            }
+        }
+        // Fallback to exe directory
         std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|p| p.to_path_buf()))

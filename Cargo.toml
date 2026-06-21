@@ -1,6 +1,6 @@
 [package]
 name = "autoduck"
-version = "1.1.0-beta"
+version = "1.1.0"
 edition = "2021"
 
 [dependencies]
@@ -30,6 +30,8 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 crossbeam-channel = "0.5"
 anyhow = "1"
+scopeguard = "1"
+dirs = "5"
 png = "0.18"
 slint = { version = "1", features = ["raw-window-handle-06"] }
 raw-window-handle = "0.6"
@@ -37,3 +39,4 @@ raw-window-handle = "0.6"
 [build-dependencies]
 slint-build = "1"
 winres = "0.1"
+embed-manifest = "1"

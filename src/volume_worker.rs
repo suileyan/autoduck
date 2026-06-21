@@ -9,7 +9,7 @@ use crate::volume_control::VolumeController;
 /// Commands sent to the volume worker thread.
 pub enum VolumeCommand {
     Duck,
-    Restore,
+    Restore { ack: Option<crossbeam_channel::Sender<()>> },
     Stop,
     UpdateConfig(AppConfig),
 }
@@ -66,13 +66,18 @@ impl VolumeWorker {
                 Ok(VolumeCommand::Duck) => {
                     self.controller.duck(self.duck_ratio);
                 }
-                Ok(VolumeCommand::Restore) => {
+                Ok(VolumeCommand::Restore { ack }) => {
                     self.controller.restore();
+                    if let Some(ack) = ack {
+                        let _ = ack.send(());
+                    }
                 }
                 Ok(VolumeCommand::Stop) => {
                     break;
                 }
                 Ok(VolumeCommand::UpdateConfig(config)) => {
+                    // Restore volume before replacing controller to avoid losing snapshots
+                    self.controller.restore();
                     match VolumeController::new(
                         config.duck_mode,
                         config.excluded_apps.clone(),

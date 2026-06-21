@@ -1,7 +1,7 @@
-/// VAD (Voice Activity Detection) debounce state machine module.
-///
-/// Provides hysteresis-based debouncing to avoid rapid state toggling
-/// caused by transient noise or brief pauses.
+//! VAD (Voice Activity Detection) debounce state machine module.
+//!
+//! Provides hysteresis-based debouncing to avoid rapid state toggling
+//! caused by transient noise or brief pauses.
 
 /// Represents the current voice activity state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,8 +119,8 @@ impl NoiseFloorTracker {
 /// Compute spectral flatness of a frame.
 /// Returns a value in [0, 1] where 1 = white noise (flat spectrum), 0 = pure tone.
 /// Uses FFT to compute power spectrum, then geometric mean / arithmetic mean.
-pub fn spectral_flatness(frame: &[f32]) -> f32 {
-    use rustfft::{FftPlanner, num_complex::Complex};
+pub fn spectral_flatness(frame: &[f32], planner: &mut rustfft::FftPlanner<f32>) -> f32 {
+    use rustfft::num_complex::Complex;
 
     let len = frame.len();
     if len == 0 {
@@ -144,7 +144,6 @@ pub fn spectral_flatness(frame: &[f32]) -> f32 {
         windowed.iter().map(|&s| Complex::new(s, 0.0)).collect();
     fft_input.resize(fft_len, Complex::new(0.0, 0.0));
 
-    let mut planner = FftPlanner::new();
     let fft = planner.plan_fft_forward(fft_len);
     fft.process(&mut fft_input);
 

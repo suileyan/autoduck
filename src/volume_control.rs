@@ -12,7 +12,8 @@ use windows::Win32::Media::Audio::{
     IMMDeviceEnumerator, MMDeviceEnumerator,
 };
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, COINIT_MULTITHREADED, CLSCTX_ALL};
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED, CLSCTX_ALL};
+use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     PROCESS_NAME_FORMAT,
@@ -26,6 +27,40 @@ static OUR_EVENT_CONTEXT: GUID = GUID::from_values(
     0x7890,
     [0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56, 0x78, 0x9A],
 );
+
+/// RAII guard for COM initialization. Calls CoUninitialize on drop.
+///
+/// # MTA Reference Counting
+///
+/// `CoInitializeEx(COINIT_MULTITHREADED)` initializes the COM Multi-Threaded Apartment (MTA),
+/// which is reference-counted per thread. Each successful `CoInitializeEx` must be paired with
+/// a `CoUninitialize`. When a `VolumeController` is replaced via `UpdateConfig`, the old
+/// controller's guard drops and calls `CoUninitialize`, decrementing the MTA reference count.
+/// This is safe because the MTA remains active as long as at least one reference exists
+/// (the new controller holds one). The MTA is only fully cleaned up when the last reference
+/// is released.
+struct CoInitializeGuard;
+
+impl CoInitializeGuard {
+    /// Initialize COM and return a guard that will uninitialize on drop.
+    fn new() -> Result<Self> {
+        unsafe {
+            CoInitializeEx(None, COINIT_MULTITHREADED)
+                .ok()
+                .context("CoInitializeEx failed")?;
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for CoInitializeGuard {
+    fn drop(&mut self) {
+        // Decrement MTA reference count; MTA remains active while other guards exist.
+        unsafe {
+            CoUninitialize();
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // VolumeController enum — dispatches to Global or Apps mode
@@ -77,6 +112,7 @@ impl VolumeController {
 // ---------------------------------------------------------------------------
 
 pub struct GlobalVolumeController {
+    _com_guard: CoInitializeGuard,
     endpoint_volume: IAudioEndpointVolume,
     volume_snapshot: Option<f32>,
     duck_duration_ms: u32,
@@ -89,11 +125,7 @@ unsafe impl Send for GlobalVolumeController {}
 
 impl GlobalVolumeController {
     pub fn new(duck_duration_ms: u32, restore_duration_ms: u32) -> Result<Self> {
-        unsafe {
-            CoInitializeEx(None, COINIT_MULTITHREADED)
-                .ok()
-                .context("CoInitializeEx failed")?;
-        }
+        let _com_guard = CoInitializeGuard::new()?;
 
         let endpoint_volume = unsafe {
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(
@@ -113,6 +145,7 @@ impl GlobalVolumeController {
         };
 
         Ok(Self {
+            _com_guard,
             endpoint_volume,
             volume_snapshot: None,
             duck_duration_ms,
@@ -121,11 +154,12 @@ impl GlobalVolumeController {
     }
 
     pub fn duck(&mut self, ratio: f32) {
-        let current = self.get_current_volume();
-        // Save snapshot only on first duck (not already ducked)
-        if self.volume_snapshot.is_none() {
-            self.volume_snapshot = Some(current);
+        if self.volume_snapshot.is_some() {
+            // Already ducked — skip to prevent further lowering
+            return;
         }
+        let current = self.get_current_volume();
+        self.volume_snapshot = Some(current);
         let target = current * ratio;
         let steps = 10u32;
         let step_delay_ms = self.duck_duration_ms / steps;
@@ -171,6 +205,7 @@ impl GlobalVolumeController {
 // ---------------------------------------------------------------------------
 
 pub struct AppsVolumeController {
+    _com_guard: CoInitializeGuard,
     session_manager: IAudioSessionManager2,
     excluded_apps: Vec<String>,
     volume_snapshots: HashMap<u32, f32>,
@@ -185,11 +220,7 @@ unsafe impl Send for AppsVolumeController {}
 
 impl AppsVolumeController {
     pub fn new(excluded_apps: Vec<String>, duck_duration_ms: u32, restore_duration_ms: u32) -> Result<Self> {
-        unsafe {
-            CoInitializeEx(None, COINIT_MULTITHREADED)
-                .ok()
-                .context("CoInitializeEx failed")?;
-        }
+        let _com_guard = CoInitializeGuard::new()?;
 
         let session_manager = unsafe {
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(
@@ -208,14 +239,10 @@ impl AppsVolumeController {
                 .context("Failed to activate IAudioSessionManager2")?
         };
 
-        // Store excluded app names in uppercase for case-insensitive comparison
-        let excluded_apps = excluded_apps
-            .into_iter()
-            .map(|s| s.to_uppercase())
-            .collect();
-
         Ok(Self {
+            _com_guard,
             session_manager,
+            // Store excluded app names as-is; comparison uses eq_ignore_ascii_case
             excluded_apps,
             volume_snapshots: HashMap::new(),
             duck_ratio: 0.3,
@@ -238,14 +265,17 @@ impl AppsVolumeController {
                     let process_name = get_process_name(pid);
                     let is_excluded = process_name
                         .as_ref()
-                        .map(|name| self.excluded_apps.contains(name))
+                        .map(|name| self.excluded_apps.iter().any(|ex| ex.eq_ignore_ascii_case(name)))
                         .unwrap_or(false);
 
                     if !is_excluded {
+                        // Skip if already ducked (snapshot exists)
+                        if self.volume_snapshots.contains_key(&pid) {
+                            continue;
+                        }
                         let current =
                             unsafe { simple_vol.GetMasterVolume().unwrap_or(1.0) };
-                        // Only save snapshot if we haven't already ducked this session
-                        self.volume_snapshots.entry(pid).or_insert(current);
+                        self.volume_snapshots.insert(pid, current);
                         let target = current * ratio;
                         set_volume_gradual_session(&simple_vol, target, steps, step_delay_ms as u64);
                     }
@@ -292,7 +322,7 @@ impl AppsVolumeController {
                     let process_name = get_process_name(pid);
                     let is_excluded = process_name
                         .as_ref()
-                        .map(|name| self.excluded_apps.contains(name))
+                        .map(|name| self.excluded_apps.iter().any(|ex| ex.eq_ignore_ascii_case(name)))
                         .unwrap_or(false);
 
                     if !is_excluded {
@@ -369,14 +399,17 @@ fn set_volume_gradual_session(
     }
 }
 
-/// Enumerate current audio session process names (uppercase).
+/// Enumerate current audio session process names.
 /// This is a standalone function that initializes its own COM.
 pub fn enumerate_audio_session_names() -> Vec<String> {
     let mut result = Vec::new();
 
     unsafe {
         // Initialize COM for this call
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let _com_guard = match CoInitializeGuard::new() {
+            Ok(g) => g,
+            Err(_) => return result,
+        };
 
         let enumerator: IMMDeviceEnumerator = match CoCreateInstance(
             &MMDeviceEnumerator,
@@ -413,7 +446,7 @@ pub fn enumerate_audio_session_names() -> Vec<String> {
                     if let Ok(pid) = control2.GetProcessId() {
                         if pid != 0 {
                             if let Some(name) = get_process_name(pid) {
-                                if !result.contains(&name) {
+                                if !result.iter().any(|r| r.eq_ignore_ascii_case(&name)) {
                                     result.push(name);
                                 }
                             }
@@ -427,15 +460,17 @@ pub fn enumerate_audio_session_names() -> Vec<String> {
     result
 }
 
-/// Get the process executable name (uppercase) from a PID.
+/// Get the process executable name from a PID.
 fn get_process_name(pid: u32) -> Option<String> {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let _guard = scopeguard::guard(handle, |h| {
+            let _ = CloseHandle(h);
+        });
         let mut buffer = [0u16; 260];
         let mut size = buffer.len() as u32;
         QueryFullProcessImageNameW(handle, PROCESS_NAME_FORMAT(0), PWSTR(buffer.as_mut_ptr()), &mut size).ok()?;
         let full_path = PWSTR(buffer.as_mut_ptr()).to_string().ok()?;
-        // Extract just the filename
-        full_path.rsplit('\\').next().map(|s| s.to_uppercase())
+        full_path.rsplit('\\').next().map(|s| s.to_string())
     }
 }

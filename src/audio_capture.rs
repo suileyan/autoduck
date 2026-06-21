@@ -18,7 +18,7 @@ impl AudioCapture {
         }
     }
 
-    pub fn start(&mut self, producer: Producer<f32>) -> anyhow::Result<()> {
+    pub fn start(&mut self, producer: Producer<f32>) -> anyhow::Result<u32> {
         let host = cpal::default_host();
         let device = host
             .default_input_device()
@@ -26,7 +26,7 @@ impl AudioCapture {
 
         let supported_config = device
             .supported_input_configs()?
-            .filter(|c| c.channels() <= 2 || c.min_sample_rate().0 <= 48000)
+            .filter(|c| c.channels() <= 2 && c.max_sample_rate().0 >= VAD_SAMPLE_RATE)
             .find(|c| c.sample_format() == cpal::SampleFormat::F32)
             .or_else(|| {
                 device
@@ -37,7 +37,23 @@ impl AudioCapture {
             .ok_or_else(|| anyhow::anyhow!("No suitable input config found"))?;
 
         let sample_format = supported_config.sample_format();
-        let config = supported_config.with_max_sample_rate().config();
+        // Select the sample rate closest to 48000Hz to avoid unnecessary resampling
+        let min_rate = supported_config.min_sample_rate();
+        let max_rate = supported_config.max_sample_rate();
+        let target_rate = cpal::SampleRate(48000);
+        let best_rate = if target_rate.0 >= min_rate.0 && target_rate.0 <= max_rate.0 {
+            target_rate
+        } else if (min_rate.0 as i64 - target_rate.0 as i64).abs()
+            < (max_rate.0 as i64 - target_rate.0 as i64).abs()
+        {
+            min_rate
+        } else {
+            max_rate
+        };
+        let config = supported_config
+            .try_with_sample_rate(best_rate)
+            .unwrap_or_else(|| supported_config.with_max_sample_rate())
+            .config();
         let channels = config.channels as usize;
 
         let mut producer = producer;
@@ -67,15 +83,21 @@ impl AudioCapture {
 
         stream.play()?;
         self.stream = Some(stream);
-        Ok(())
+        Ok(config.sample_rate.0)
     }
 
     pub fn stop(&mut self) {
         self.stream = None;
     }
+}
 
+/// Conservative ring buffer capacity: 192000 * 2 = 384000 samples (2 seconds at 192kHz).
+/// For 48kHz devices this is ~8 seconds of buffer — only ~1.1MB extra memory.
+const RING_BUFFER_CAPACITY: usize = 384000;
+
+impl AudioCapture {
     pub fn create_ring_buffer() -> (Producer<f32>, Consumer<f32>) {
-        rtrb::RingBuffer::new(VAD_SAMPLE_RATE as usize)
+        rtrb::RingBuffer::new(RING_BUFFER_CAPACITY)
     }
 }
 
@@ -116,9 +138,8 @@ enum ResampleState {
     IntegerDecimation { ratio: usize },
     /// Non-integer ratio — use rubato FftFixedInOut resampler.
     Rubato {
-        resampler: FftFixedInOut<f32>,
+        resampler: Box<FftFixedInOut<f32>>,
         input_buffer: Vec<f32>,
-        leftover: Vec<f32>,
     },
 }
 
@@ -134,21 +155,18 @@ impl FrameReader {
     pub fn new(consumer: Consumer<f32>, native_sample_rate: u32) -> Self {
         let resample_state = if native_sample_rate == VAD_SAMPLE_RATE {
             ResampleState::Passthrough
-        } else if native_sample_rate % VAD_SAMPLE_RATE == 0 {
+        } else if native_sample_rate.is_multiple_of(VAD_SAMPLE_RATE) {
             let ratio = (native_sample_rate / VAD_SAMPLE_RATE) as usize;
             ResampleState::IntegerDecimation { ratio }
         } else {
-            let resampler = FftFixedInOut::<f32>::new(
-                native_sample_rate as usize,
-                VAD_SAMPLE_RATE as usize,
-                1024, // chunk size — reasonable default
-                1,    // channels
-            )
-            .expect("Failed to create rubato resampler");
             ResampleState::Rubato {
-                resampler,
+                resampler: Box::new(FftFixedInOut::<f32>::new(
+                    native_sample_rate as usize,
+                    VAD_SAMPLE_RATE as usize,
+                    1024,
+                    1,
+                ).expect("Failed to create rubato resampler")),
                 input_buffer: Vec::new(),
-                leftover: Vec::new(),
             }
         };
 
@@ -190,29 +208,23 @@ impl FrameReader {
             ResampleState::Rubato {
                 resampler,
                 input_buffer,
-                leftover,
             } => {
+                // FftFixedInOut processes fixed-size chunks with no output delay:
+                // each process() call produces exactly output_frames_next() samples
+                // for input_frames_next() input samples, with no cross-call state
+                // needed beyond input_buffer for partial chunks.
                 input_buffer.extend_from_slice(raw);
                 let mut output = Vec::new();
 
                 let chunk_size = resampler.input_frames_next();
                 while input_buffer.len() >= chunk_size {
                     let chunk: Vec<f32> = input_buffer.drain(..chunk_size).collect();
-                    // rubato expects &[Vec<f32>] — one Vec per channel.
                     let input_channels = vec![chunk];
                     let resampled_channels = resampler.process(&input_channels, None).unwrap();
                     output.extend_from_slice(&resampled_channels[0]);
                 }
 
-                // Any remaining partial chunk stays in input_buffer for next call.
-                // Prepend any leftover from previous process call.
-                if !leftover.is_empty() {
-                    let combined: Vec<f32> = leftover.drain(..).chain(output.iter().copied()).collect();
-                    leftover.clear();
-                    combined
-                } else {
-                    output
-                }
+                output
             }
         }
     }

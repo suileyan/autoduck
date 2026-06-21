@@ -27,6 +27,7 @@ pub enum GuiUpdate {
 
 pub struct GuiApp {
     window: SettingsWindow,
+    _timer: slint::Timer,
 }
 
 impl GuiApp {
@@ -113,16 +114,16 @@ impl GuiApp {
                 win.set_status_text("无效的进程名".into());
                 return;
             }
-            let upper_name = name_str.to_uppercase();
+            let name_str = name_str.to_string();
             let win = win_add.upgrade().unwrap();
             let model = win.get_app_list();
             let vec_model = model.as_any()
                 .downcast_ref::<slint::VecModel<AppEntry>>()
                 .unwrap();
 
-            // Check if already in the list
+            // Check if already in the list (case-insensitive)
             for i in 0..vec_model.row_count() {
-                if vec_model.row_data(i).map(|e| e.name.to_string().to_uppercase() == upper_name).unwrap_or(false) {
+                if vec_model.row_data(i).map(|e| e.name.to_string().eq_ignore_ascii_case(&name_str)).unwrap_or(false) {
                     // Already exists, just mark as excluded
                     if let Some(mut entry) = vec_model.row_data(i) {
                         entry.excluded = true;
@@ -135,7 +136,7 @@ impl GuiApp {
 
             // Not in list, add new entry
             vec_model.push(AppEntry {
-                name: upper_name.into(),
+                name: name_str.into(),
                 excluded: true,
             });
             win.set_status_text("".into());
@@ -144,7 +145,7 @@ impl GuiApp {
         // --- Callback: Remove Excluded App ---
         let win_remove = window.as_weak();
         window.on_remove_excluded_app(move |name: slint::SharedString| {
-            let upper_name = name.to_string().to_uppercase();
+            let name_str = name.to_string();
             let win = win_remove.upgrade().unwrap();
             let model = win.get_app_list();
             let vec_model = model.as_any()
@@ -152,7 +153,7 @@ impl GuiApp {
                 .unwrap();
 
             for i in 0..vec_model.row_count() {
-                if vec_model.row_data(i).map(|e| e.name.to_string().to_uppercase() == upper_name).unwrap_or(false) {
+                if vec_model.row_data(i).map(|e| e.name.to_string().eq_ignore_ascii_case(&name_str)).unwrap_or(false) {
                     if let Some(mut entry) = vec_model.row_data(i) {
                         entry.excluded = false;
                         vec_model.set_row_data(i, entry);
@@ -182,6 +183,8 @@ impl GuiApp {
                         let _ = ShowWindow(hwnd, SW_HIDE);
                     }
                 }
+                // Fallback: if HWND not available, just keep window shown
+                // (slint will handle hiding via its own mechanism)
             }
             slint::CloseRequestResponse::KeepWindowShown
         });
@@ -227,6 +230,9 @@ impl GuiApp {
                             unsafe {
                                 let _ = ShowWindow(hwnd, SW_SHOW);
                             }
+                        } else {
+                            // Fallback: use slint's show() if Win32 HWND not available
+                            let _ = win.show();
                         }
                     }
                     GuiUpdate::Quit => {
@@ -237,10 +243,7 @@ impl GuiApp {
             }
         });
 
-        // Keep timer alive
-        std::mem::forget(timer);
-
-        Ok(Self { window })
+        Ok(Self { window, _timer: timer })
     }
 
     pub fn show(&self) {
@@ -277,7 +280,7 @@ impl AppConfig {
             for i in 0..vec_model.row_count() {
                 if let Some(entry) = vec_model.row_data(i) {
                     if entry.excluded {
-                        excluded_apps.push(entry.name.to_string().to_uppercase());
+                        excluded_apps.push(entry.name.to_string());
                     }
                 }
             }

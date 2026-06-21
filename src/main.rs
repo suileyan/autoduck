@@ -19,8 +19,9 @@ use earshot::Detector;
 use config::AppConfig;
 use config::DuckMode;
 use gui::{GuiApp, GuiMessage, GuiUpdate};
-use tray_icon::TrayEvent;
+use tray_icon::{TrayEvent, TrayUpdate};
 use vad_state::{VadStateMachine, VoiceState, NoiseFloorTracker, spectral_flatness};
+use rustfft::FftPlanner;
 use volume_control::VolumeController;
 use volume_worker::{VolumeCommand, VolumeWorker};
 
@@ -32,6 +33,20 @@ enum VadCommand {
         spectral_flatness_threshold: f32,
         noise_floor_multiplier: f32,
     },
+}
+
+/// Parameters for the VAD loop, grouped to reduce function argument count.
+struct VadParams {
+    /// Voice activity detection score threshold (0.0–1.0). Scores above this are considered speech.
+    threshold: f32,
+    /// Number of consecutive voice frames required to transition from Silent to Speaking.
+    attack_frames: u32,
+    /// Number of consecutive silence frames required to transition from Speaking to Silent.
+    release_frames: u32,
+    /// Spectral flatness threshold (0.0–1.0). Frames with flatness above this are treated as noise.
+    spectral_flatness_threshold: f32,
+    /// Multiplier applied to the noise floor RMS to compute the effective VAD threshold.
+    noise_floor_multiplier: f32,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -55,7 +70,6 @@ fn main() -> anyhow::Result<()> {
     let volume_controller = VolumeController::new(config.duck_mode, config.excluded_apps.clone(), config.duck_duration_ms, config.restore_duration_ms)?;
     let duck_ratio = config.duck_ratio;
     let volume_worker = VolumeWorker::new(volume_controller, volume_cmd_rx, duck_ratio);
-    let volume_cmd_tx_clone = volume_cmd_tx.clone();
     let crash_tx_vad = crash_tx.clone();
     let volume_handle = std::thread::Builder::new()
         .name("volume-worker".into())
@@ -74,20 +88,26 @@ fn main() -> anyhow::Result<()> {
     let spectral_flatness_threshold = config.spectral_flatness_threshold;
     let noise_floor_multiplier = config.noise_floor_multiplier;
 
+    let vad_params = VadParams {
+        threshold: vad_threshold,
+        attack_frames,
+        release_frames,
+        spectral_flatness_threshold,
+        noise_floor_multiplier,
+    };
+
     let vad_handle = std::thread::Builder::new()
         .name("vad-worker".into())
         .spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 run_vad_loop(
                     running_clone,
-                    vad_threshold,
-                    attack_frames,
-                    release_frames,
-                    spectral_flatness_threshold,
-                    noise_floor_multiplier,
+                    vad_params,
                     vad_state_tx,
-                    volume_cmd_tx_clone,
                     vad_cmd_rx,
+                    // Clone crash_tx for run_vad_loop (which moves it);
+                    // the original crash_tx_vad is used after catch_unwind for panic reporting.
+                    crash_tx_vad.clone(),
                 );
             }));
 
@@ -111,10 +131,11 @@ fn main() -> anyhow::Result<()> {
     let auto_start = autostart::is_auto_start_enabled();
     let tray_event_tx_clone = tray_event_tx.clone();
     let running_tray = running.clone();
+    let (tray_update_tx, tray_update_rx) = unbounded::<TrayUpdate>();
     let tray_handle = std::thread::Builder::new()
         .name("tray".into())
         .spawn(move || {
-            if let Err(e) = tray_icon::run_tray(tray_event_tx_clone, tray_mode, auto_start, running_tray) {
+            if let Err(e) = tray_icon::run_tray(tray_event_tx_clone, tray_mode, auto_start, running_tray, tray_update_rx) {
                 eprintln!("托盘线程错误: {}", e);
             }
         })?;
@@ -127,9 +148,12 @@ fn main() -> anyhow::Result<()> {
         // 检查崩溃通知
         if let Ok(crash_msg) = crash_rx.try_recv() {
             eprintln!("工作线程崩溃: {}", crash_msg);
-            // 退出前先恢复音量
-            let _ = volume_cmd_tx.send(VolumeCommand::Restore);
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            // 通知托盘显示崩溃状态
+            let _ = tray_update_tx.send(TrayUpdate::Crashed);
+            // 退出前先恢复音量，使用 ack 确认完成
+            let (ack_tx, ack_rx) = crossbeam_channel::bounded::<()>(1);
+            let _ = volume_cmd_tx.send(VolumeCommand::Restore { ack: Some(ack_tx) });
+            let _ = ack_rx.recv_timeout(std::time::Duration::from_secs(5));
             break;
         }
 
@@ -142,7 +166,7 @@ fn main() -> anyhow::Result<()> {
                         let _ = volume_cmd_tx.send(VolumeCommand::Duck);
                     }
                     VoiceState::Silent => {
-                        let _ = volume_cmd_tx.send(VolumeCommand::Restore);
+                        let _ = volume_cmd_tx.send(VolumeCommand::Restore { ack: None });
                     }
                 }
             }
@@ -152,9 +176,10 @@ fn main() -> anyhow::Result<()> {
         if let Ok(event) = tray_event_rx.try_recv() {
             match event {
                 TrayEvent::Quit => {
-                    // 退出前先恢复音量
-                    let _ = volume_cmd_tx.send(VolumeCommand::Restore);
-                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    // 退出前先恢复音量，使用 ack 确认完成
+                    let (ack_tx, ack_rx) = crossbeam_channel::bounded::<()>(1);
+                    let _ = volume_cmd_tx.send(VolumeCommand::Restore { ack: Some(ack_tx) });
+                    let _ = ack_rx.recv_timeout(std::time::Duration::from_secs(5));
                     running.store(false, Ordering::Relaxed);
                     let _ = volume_cmd_tx.send(VolumeCommand::Stop);
                     break;
@@ -233,9 +258,9 @@ fn main() -> anyhow::Result<()> {
                 GuiMessage::RefreshApps => {
                     // Enumerate audio sessions
                     let session_names = volume_control::enumerate_audio_session_names();
-                    // Build app list: (name, is_excluded)
+                    // Build app list: (name, is_excluded) — case-insensitive comparison
                     let apps: Vec<(String, bool)> = session_names.into_iter().map(|name| {
-                        let excluded = config.excluded_apps.contains(&name);
+                        let excluded = config.excluded_apps.iter().any(|excluded| excluded.eq_ignore_ascii_case(&name));
                         (name, excluded)
                     }).collect();
                     // Send to GUI thread
@@ -268,32 +293,38 @@ fn main() -> anyhow::Result<()> {
 
 fn run_vad_loop(
     running: Arc<AtomicBool>,
-    mut threshold: f32,
-    initial_attack_frames: u32,
-    initial_release_frames: u32,
-    mut spectral_flatness_threshold: f32,
-    mut noise_floor_multiplier: f32,
+    params: VadParams,
     vad_state_tx: Sender<VoiceState>,
-    _volume_cmd_tx: Sender<VolumeCommand>,
     vad_cmd_rx: crossbeam_channel::Receiver<VadCommand>,
+    crash_tx: Sender<String>,
 ) {
+    // Use a placeholder sample rate for ring buffer; will be updated after capture.start
     let (producer, consumer) = audio_capture::AudioCapture::create_ring_buffer();
 
     let mut capture = audio_capture::AudioCapture::new();
-    if let Err(e) = capture.start(producer) {
-        eprintln!("音频采集启动失败: {}", e);
-        return;
-    }
+    let native_sample_rate = match capture.start(producer) {
+        Ok(rate) => rate,
+        Err(e) => {
+            let msg = format!("音频采集启动失败: {}", e);
+            eprintln!("{}", msg);
+            let _ = crash_tx.send(msg);
+            return;
+        }
+    };
 
-    // 获取实际采样率用于 FrameReader
-    // 使用默认 48000Hz，因为 cpal 通常使用这个采样率
-    let native_sample_rate = 48000;
+    // Recreate ring buffer with correct size and FrameReader with actual sample rate
+    // Since the producer was already consumed by start(), we use the consumer as-is
+    // but the ring buffer was created with 48000 * 2 capacity which is sufficient
     let mut frame_reader = audio_capture::FrameReader::new(consumer, native_sample_rate);
 
     let mut detector = Detector::default();
-    let mut state_machine = VadStateMachine::new(initial_attack_frames, initial_release_frames);
+    let mut state_machine = VadStateMachine::new(params.attack_frames, params.release_frames);
     let mut noise_tracker = NoiseFloorTracker::new(0.005);
     let mut current_state = VoiceState::Silent;
+    let mut threshold = params.threshold;
+    let mut spectral_flatness_threshold = params.spectral_flatness_threshold;
+    let mut noise_floor_multiplier = params.noise_floor_multiplier;
+    let mut fft_planner = FftPlanner::new();
 
     while running.load(Ordering::Relaxed) {
         // Check for parameter updates
@@ -325,7 +356,7 @@ fn run_vad_loop(
             }
 
             // Compute spectral flatness pre-filter
-            let sf = spectral_flatness(&frame);
+            let sf = spectral_flatness(&frame, &mut fft_planner);
 
             // earshot 需要精确 256 个 i16 采样
             let frame_i16: Vec<i16> = frame
@@ -346,7 +377,7 @@ fn run_vad_loop(
 
                 if let Some(new_state) = state_machine.update(score, effective_threshold) {
                     current_state = new_state;
-                    let _ = vad_state_tx.send(new_state);
+                    let _ = vad_state_tx.try_send(new_state);
                 }
             }
         } else {
