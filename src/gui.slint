@@ -5,44 +5,6 @@ export struct AppEntry {
     excluded: bool,
 }
 
-component TipLabel inherits Rectangle {
-    in property <string> label: "";
-    in property <string> tip: "";
-
-    width: lbl.preferred-width + 4px;
-    height: lbl.preferred-height;
-
-    lbl := Text {
-        text: root.label;
-        vertical-stretch: 0;
-    }
-
-    ta := TouchArea {
-        width: parent.width;
-        height: parent.height;
-    }
-
-    if ta.has-hover: Rectangle {
-        x: 0px;
-        y: parent.height + 4px;
-        width: ttxt.preferred-width + 16px;
-        height: ttxt.preferred-height + 12px;
-        background: #333333;
-        border-radius: 4px;
-        z: 100;
-
-        ttxt := Text {
-            text: root.tip;
-            color: white;
-            font-size: 12px;
-            x: 8px;
-            y: 6px;
-            width: 300px;
-            wrap: word-wrap;
-        }
-    }
-}
-
 export component SettingsWindow inherits Window {
     title: "AutoDuck 设置";
     icon: @image-url("../icon.png");
@@ -170,7 +132,7 @@ export component SettingsWindow inherits Window {
                                     attack-ms-changed(val);
                                 }
                             }
-                            Text { text: "ms"; vertical-stretch: 0; min-width: 30px; }
+                            Text { text: "ms"; vertical-stretch: 0; min-width: 30px; vertical-alignment: center; }
                         }
 
                         HorizontalBox {
@@ -182,16 +144,11 @@ export component SettingsWindow inherits Window {
                                     release-ms-changed(val);
                                 }
                             }
-                            Text { text: "ms"; vertical-stretch: 0; min-width: 30px; }
+                            Text { text: "ms"; vertical-stretch: 0; min-width: 30px; vertical-alignment: center; }
                         }
 
                         HorizontalBox {
-                            TipLabel {
-                                label: "噪声过滤※";
-                                tip: "频谱平坦度阈值：衡量声音信号的频率分布均匀程度。值越低，越容易将均匀噪声（如风扇声）识别为非语音，从而避免误触发降音。建议保持默认值。";
-                                min-width: 100px;
-                                vertical-stretch: 0;
-                            }
+                            Text { text: "噪声过滤:"; vertical-stretch: 0; min-width: 100px; }
                             Slider {
                                 minimum: 0.0;
                                 maximum: 1.0;
@@ -200,14 +157,16 @@ export component SettingsWindow inherits Window {
                             }
                             Text { text: round(spectral-flatness-threshold * 100) + "%"; min-width: 50px; vertical-stretch: 0; }
                         }
+                        Text {
+                            text: "衡量声音频率分布的均匀程度，值越低越容易将风扇等均匀噪声识别为非语音";
+                            font-size: 11px;
+                            color: #888888;
+                            wrap: word-wrap;
+                            vertical-stretch: 0;
+                        }
 
                         HorizontalBox {
-                            TipLabel {
-                                label: "噪声适应※";
-                                tip: "噪声底噪倍率：在安静环境下自动测量的背景噪声基础上，乘以此倍率作为有效检测阈值。值越大，需要越大的声音才能触发降音。如果环境噪音大导致频繁误触发，可适当增大此值。";
-                                min-width: 100px;
-                                vertical-stretch: 0;
-                            }
+                            Text { text: "噪声适应:"; vertical-stretch: 0; min-width: 100px; }
                             Slider {
                                 minimum: 1.0;
                                 maximum: 5.0;
@@ -215,6 +174,13 @@ export component SettingsWindow inherits Window {
                                 changed(val) => { noise-floor-multiplier = val; }
                             }
                             Text { text: round(noise-floor-multiplier * 10) / 10; min-width: 50px; vertical-stretch: 0; }
+                        }
+                        Text {
+                            text: "在背景噪声基础上乘以此倍率作为检测阈值，值越大需要越大的声音才能触发";
+                            font-size: 11px;
+                            color: #888888;
+                            wrap: word-wrap;
+                            vertical-stretch: 0;
                         }
                     }
                 }

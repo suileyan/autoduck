@@ -73,6 +73,8 @@ impl VolumeWorker {
                     }
                 }
                 Ok(VolumeCommand::Stop) => {
+                    // 退出前恢复音量，防止应用退出后音量仍处于降音状态
+                    self.controller.restore();
                     break;
                 }
                 Ok(VolumeCommand::UpdateConfig(config)) => {
