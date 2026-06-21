@@ -47,6 +47,8 @@ impl GuiApp {
         window.set_vad_threshold(config.vad_threshold);
         window.set_attack_frames(config.attack_frames as i32);
         window.set_release_frames(config.release_frames as i32);
+        window.set_attack_ms((config.attack_frames * 16).to_string().into());
+        window.set_release_ms((config.release_frames * 16).to_string().into());
         window.set_duck_duration_ms(config.duck_duration_ms as i32);
         window.set_restore_duration_ms(config.restore_duration_ms as i32);
         window.set_spectral_flatness_threshold(config.spectral_flatness_threshold);
@@ -87,6 +89,8 @@ impl GuiApp {
             win.set_vad_threshold(default.vad_threshold);
             win.set_attack_frames(default.attack_frames as i32);
             win.set_release_frames(default.release_frames as i32);
+            win.set_attack_ms((default.attack_frames * 16).to_string().into());
+            win.set_release_ms((default.release_frames * 16).to_string().into());
             win.set_duck_duration_ms(default.duck_duration_ms as i32);
             win.set_restore_duration_ms(default.restore_duration_ms as i32);
             win.set_spectral_flatness_threshold(default.spectral_flatness_threshold);
@@ -170,6 +174,28 @@ impl GuiApp {
             let _ = sender_refresh.send(GuiMessage::RefreshApps);
         });
 
+        // --- Callback: Attack ms changed ---
+        let win_attack = window.as_weak();
+        window.on_attack_ms_changed(move |val: slint::SharedString| {
+            if let Ok(ms) = val.parse::<u32>() {
+                let frames = (ms / 16).max(1);
+                if let Some(win) = win_attack.upgrade() {
+                    win.set_attack_frames(frames as i32);
+                }
+            }
+        });
+
+        // --- Callback: Release ms changed ---
+        let win_release = window.as_weak();
+        window.on_release_ms_changed(move |val: slint::SharedString| {
+            if let Ok(ms) = val.parse::<u32>() {
+                let frames = (ms / 16).max(1);
+                if let Some(win) = win_release.upgrade() {
+                    win.set_release_frames(frames as i32);
+                }
+            }
+        });
+
         // --- Intercept window close: use Win32 SW_HIDE instead of slint hide() ---
         // slint's Window::hide() calls quit_event_loop() when window_count reaches 0,
         // which kills the event loop and prevents reopening. We use KeepWindowShown
@@ -218,6 +244,8 @@ impl GuiApp {
                         win.set_vad_threshold(config.vad_threshold);
                         win.set_attack_frames(config.attack_frames as i32);
                         win.set_release_frames(config.release_frames as i32);
+                        win.set_attack_ms((config.attack_frames * 16).to_string().into());
+                        win.set_release_ms((config.release_frames * 16).to_string().into());
                         win.set_duck_duration_ms(config.duck_duration_ms as i32);
                         win.set_restore_duration_ms(config.restore_duration_ms as i32);
                         win.set_spectral_flatness_threshold(config.spectral_flatness_threshold);

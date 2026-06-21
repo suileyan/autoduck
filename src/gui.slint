@@ -5,6 +5,44 @@ export struct AppEntry {
     excluded: bool,
 }
 
+component TipLabel inherits Rectangle {
+    in property <string> label: "";
+    in property <string> tip: "";
+
+    width: lbl.preferred-width + 4px;
+    height: lbl.preferred-height;
+
+    lbl := Text {
+        text: root.label;
+        vertical-stretch: 0;
+    }
+
+    ta := TouchArea {
+        width: parent.width;
+        height: parent.height;
+    }
+
+    if ta.has-hover: Rectangle {
+        x: 0px;
+        y: parent.height + 4px;
+        width: ttxt.preferred-width + 16px;
+        height: ttxt.preferred-height + 12px;
+        background: #333333;
+        border-radius: 4px;
+        z: 100;
+
+        ttxt := Text {
+            text: root.tip;
+            color: white;
+            font-size: 12px;
+            x: 8px;
+            y: 6px;
+            width: 300px;
+            wrap: word-wrap;
+        }
+    }
+}
+
 export component SettingsWindow inherits Window {
     title: "AutoDuck 设置";
     icon: @image-url("../icon.png");
@@ -26,6 +64,11 @@ export component SettingsWindow inherits Window {
     in-out property <float> vad-threshold: 0.5;
     in-out property <int> attack-frames: 4;
     in-out property <int> release-frames: 30;
+    in-out property <string> attack-ms: "96";
+    in-out property <string> release-ms: "480";
+
+    callback attack-ms-changed(string);
+    callback release-ms-changed(string);
     in-out property <int> duck-duration-ms: 120;
     in-out property <int> restore-duration-ms: 120;
     in-out property <float> spectral-flatness-threshold: 0.65;
@@ -119,29 +162,36 @@ export component SettingsWindow inherits Window {
                         }
 
                         HorizontalBox {
-                            Text { text: "触发帧数:"; vertical-stretch: 0; min-width: 100px; }
-                            SpinBox {
-                                value: attack-frames;
-                                minimum: 1;
-                                maximum: 20;
-                                edited(val) => { attack-frames = val; }
+                            Text { text: "反应时长:"; vertical-stretch: 0; min-width: 100px; }
+                            LineEdit {
+                                text: attack-ms;
+                                edited(val) => {
+                                    attack-ms = val;
+                                    attack-ms-changed(val);
+                                }
                             }
-                            Text { text: "(" + attack-frames * 16 + "ms)"; vertical-stretch: 0; }
+                            Text { text: "ms"; vertical-stretch: 0; min-width: 30px; }
                         }
 
                         HorizontalBox {
-                            Text { text: "释放帧数:"; vertical-stretch: 0; min-width: 100px; }
-                            SpinBox {
-                                value: release-frames;
-                                minimum: 5;
-                                maximum: 100;
-                                edited(val) => { release-frames = val; }
+                            Text { text: "恢复间隔:"; vertical-stretch: 0; min-width: 100px; }
+                            LineEdit {
+                                text: release-ms;
+                                edited(val) => {
+                                    release-ms = val;
+                                    release-ms-changed(val);
+                                }
                             }
-                            Text { text: "(" + release-frames * 16 + "ms)"; vertical-stretch: 0; }
+                            Text { text: "ms"; vertical-stretch: 0; min-width: 30px; }
                         }
 
                         HorizontalBox {
-                            Text { text: "频谱平坦度:"; vertical-stretch: 0; min-width: 100px; }
+                            TipLabel {
+                                label: "噪声过滤※";
+                                tip: "频谱平坦度阈值：衡量声音信号的频率分布均匀程度。值越低，越容易将均匀噪声（如风扇声）识别为非语音，从而避免误触发降音。建议保持默认值。";
+                                min-width: 100px;
+                                vertical-stretch: 0;
+                            }
                             Slider {
                                 minimum: 0.0;
                                 maximum: 1.0;
@@ -152,7 +202,12 @@ export component SettingsWindow inherits Window {
                         }
 
                         HorizontalBox {
-                            Text { text: "噪声倍率:"; vertical-stretch: 0; min-width: 100px; }
+                            TipLabel {
+                                label: "噪声适应※";
+                                tip: "噪声底噪倍率：在安静环境下自动测量的背景噪声基础上，乘以此倍率作为有效检测阈值。值越大，需要越大的声音才能触发降音。如果环境噪音大导致频繁误触发，可适当增大此值。";
+                                min-width: 100px;
+                                vertical-stretch: 0;
+                            }
                             Slider {
                                 minimum: 1.0;
                                 maximum: 5.0;
