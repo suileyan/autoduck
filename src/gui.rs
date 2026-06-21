@@ -1,7 +1,10 @@
 use crate::config::{validate_process_name, AppConfig, DuckMode};
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
+use raw_window_handle::HasWindowHandle;
 use slint::Model;
+use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOW};
 
 slint::include_modules!();
 
@@ -166,9 +169,22 @@ impl GuiApp {
             let _ = sender_refresh.send(GuiMessage::RefreshApps);
         });
 
-        // --- Intercept window close: hide instead of destroying ---
-        // This keeps the window alive (just hidden) so it can be shown again.
-        window.window().on_close_requested(|| slint::CloseRequestResponse::HideWindow);
+        // --- Intercept window close: use Win32 SW_HIDE instead of slint hide() ---
+        // slint's Window::hide() calls quit_event_loop() when window_count reaches 0,
+        // which kills the event loop and prevents reopening. We use KeepWindowShown
+        // to prevent slint from calling hide(), then use Win32 ShowWindow(SW_HIDE)
+        // to visually hide the window (disappears from taskbar).
+        let win_close = window.as_weak();
+        window.window().on_close_requested(move || {
+            if let Some(win) = win_close.upgrade() {
+                if let Some(hwnd) = get_hwnd(&win) {
+                    unsafe {
+                        let _ = ShowWindow(hwnd, SW_HIDE);
+                    }
+                }
+            }
+            slint::CloseRequestResponse::KeepWindowShown
+        });
 
         // --- Timer to poll for updates from main loop ---
         let win_timer = window.as_weak();
@@ -205,7 +221,13 @@ impl GuiApp {
                         win.set_noise_floor_multiplier(config.noise_floor_multiplier);
                     }
                     GuiUpdate::ShowSettings => {
-                        let _ = win.show();
+                        // Show the window using Win32 ShowWindow(SW_SHOW)
+                        // This bypasses slint's show() which would re-increment window_count
+                        if let Some(hwnd) = get_hwnd(&win) {
+                            unsafe {
+                                let _ = ShowWindow(hwnd, SW_SHOW);
+                            }
+                        }
                     }
                     GuiUpdate::Quit => {
                         let _ = slint::quit_event_loop();
@@ -215,21 +237,27 @@ impl GuiApp {
             }
         });
 
-        Ok(Self { window })
-    }
+        // Keep timer alive
+        std::mem::forget(timer);
 
-    #[allow(dead_code)]
-    pub fn run(&self) {
-        self.window.run().unwrap();
+        Ok(Self { window })
     }
 
     pub fn show(&self) {
         let _ = self.window.show();
     }
+}
 
-    #[allow(dead_code)]
-    pub fn hide(&self) {
-        self.window.hide().unwrap();
+/// Extract the Win32 HWND from a slint SettingsWindow
+fn get_hwnd(win: &SettingsWindow) -> Option<HWND> {
+    let slint_handle = win.window().window_handle();
+    let raw = slint_handle.window_handle().ok()?;
+    match raw.as_raw() {
+        raw_window_handle::RawWindowHandle::Win32(win32_handle) => {
+            let ptr = win32_handle.hwnd.get() as *mut core::ffi::c_void;
+            Some(HWND(ptr))
+        }
+        _ => None,
     }
 }
 

@@ -114,11 +114,6 @@ impl NoiseFloorTracker {
         let noise_threshold = self.noise_floor * multiplier;
         user_threshold.max(noise_threshold)
     }
-
-    /// Get the current noise floor estimate
-    pub fn noise_floor(&self) -> f32 {
-        self.noise_floor
-    }
 }
 
 /// Compute spectral flatness of a frame.

@@ -178,8 +178,10 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 TrayEvent::OpenSettings => {
+                    // GUI 线程只创建一次，持久运行
+                    // 窗口关闭时通过 Win32 SW_HIDE 隐藏（不退出事件循环）
+                    // 再次打开时通过 GuiUpdate::ShowSettings 恢复显示
                     if gui_handle.is_none() {
-                        // First time: create GUI thread
                         let gui_config = config.clone();
                         let gui_msg_tx = gui_msg_tx.clone();
                         let gui_update_rx = gui_update_rx.clone();
@@ -189,9 +191,6 @@ fn main() -> anyhow::Result<()> {
                                 match GuiApp::new(&gui_config, gui_msg_tx, gui_update_rx) {
                                     Ok(gui) => {
                                         gui.show();
-                                        // Use run_event_loop_until_quit so the event loop
-                                        // stays alive when the window is hidden (not destroyed),
-                                        // allowing the settings window to be reopened.
                                         let _ = slint::run_event_loop_until_quit();
                                     }
                                     Err(e) => {
@@ -203,7 +202,7 @@ fn main() -> anyhow::Result<()> {
                             gui_handle = Some(h);
                         }
                     } else {
-                        // GUI thread already running, just show the window
+                        // GUI 线程已在运行，通知显示窗口
                         let _ = gui_update_tx.send(GuiUpdate::ShowSettings);
                     }
                 }
@@ -253,15 +252,13 @@ fn main() -> anyhow::Result<()> {
     let _ = volume_cmd_tx.send(VolumeCommand::Stop);
     let _ = vad_handle.join();
     let _ = volume_handle.join();
-    // 托盘线程通过 running 标志退出，带超时等待
+    // 托盘线程通过 running 标志退出
     match tray_handle.join() {
         Ok(()) => {}
         Err(_) => eprintln!("托盘线程 join 失败"),
     }
     // 通知 GUI 线程退出事件循环
-    if gui_handle.is_some() {
-        let _ = gui_update_tx.send(GuiUpdate::Quit);
-    }
+    let _ = gui_update_tx.send(GuiUpdate::Quit);
     if let Some(h) = gui_handle {
         let _ = h.join();
     }

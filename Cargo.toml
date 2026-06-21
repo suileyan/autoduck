@@ -21,6 +21,7 @@ windows = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
     "Win32_Security",
+    "Win32_Graphics_Gdi",
 ] }
 
 tray-icon = "0.19"
@@ -30,7 +31,8 @@ toml = "0.8"
 crossbeam-channel = "0.5"
 anyhow = "1"
 png = "0.18"
-slint = "1"
+slint = { version = "1", features = ["raw-window-handle-06"] }
+raw-window-handle = "0.6"
 
 [build-dependencies]
 slint-build = "1"
