@@ -4,6 +4,7 @@ mod audio_capture;
 mod autostart;
 mod config;
 mod gui;
+mod hotkey;
 mod single_instance;
 mod tray_icon;
 mod vad_state;
@@ -33,6 +34,7 @@ enum VadCommand {
         spectral_flatness_threshold: f32,
         noise_floor_multiplier: f32,
     },
+    SetEnabled(bool),
 }
 
 /// Parameters for the VAD loop, grouped to reduce function argument count.
@@ -132,10 +134,12 @@ fn main() -> anyhow::Result<()> {
     let tray_event_tx_clone = tray_event_tx.clone();
     let running_tray = running.clone();
     let (tray_update_tx, tray_update_rx) = unbounded::<TrayUpdate>();
+    let tray_enabled = config.enabled;
+    let tray_hotkey = config.hotkey.clone();
     let tray_handle = std::thread::Builder::new()
         .name("tray".into())
         .spawn(move || {
-            if let Err(e) = tray_icon::run_tray(tray_event_tx_clone, tray_mode, auto_start, running_tray, tray_update_rx) {
+            if let Err(e) = tray_icon::run_tray(tray_event_tx_clone, tray_mode, auto_start, tray_enabled, tray_hotkey, running_tray, tray_update_rx) {
                 eprintln!("托盘线程错误: {}", e);
             }
         })?;
@@ -143,6 +147,12 @@ fn main() -> anyhow::Result<()> {
     // 7. 主事件循环：监听 VAD 状态变化、托盘事件、GUI 消息、崩溃通知
     let mut current_voice_state = VoiceState::Silent;
     let mut gui_handle: Option<std::thread::JoinHandle<()>> = None;
+    let mut _vad_enabled = config.enabled;
+
+    // 如果配置中 enabled=false，通知 VAD 线程暂停
+    if !_vad_enabled {
+        let _ = vad_cmd_tx.send(VadCommand::SetEnabled(false));
+    }
 
     loop {
         // 检查崩溃通知
@@ -183,6 +193,21 @@ fn main() -> anyhow::Result<()> {
                     running.store(false, Ordering::Relaxed);
                     let _ = volume_cmd_tx.send(VolumeCommand::Stop);
                     break;
+                }
+                TrayEvent::ToggleEnabled(enabled) => {
+                    _vad_enabled = enabled;
+                    config.enabled = enabled;
+                    if let Err(e) = config.save(&config_path) {
+                        eprintln!("保存配置失败: {}", e);
+                    }
+                    if enabled {
+                        let _ = vad_cmd_tx.send(VadCommand::SetEnabled(true));
+                    } else {
+                        let _ = vad_cmd_tx.send(VadCommand::SetEnabled(false));
+                        // 禁用时恢复音量
+                        let _ = volume_cmd_tx.send(VolumeCommand::Restore { ack: None });
+                    }
+                    let _ = tray_update_tx.send(TrayUpdate::EnabledChanged(enabled));
                 }
                 TrayEvent::ToggleMode(mode) => {
                     config.duck_mode = mode;
@@ -266,6 +291,13 @@ fn main() -> anyhow::Result<()> {
                     // Send to GUI thread
                     let _ = gui_update_tx.send(GuiUpdate::AppList(apps));
                 }
+                GuiMessage::HotkeyChanged(hotkey) => {
+                    config.hotkey = hotkey;
+                    if let Err(e) = config.save(&config_path) {
+                        eprintln!("保存配置失败: {}", e);
+                    }
+                    let _ = tray_update_tx.send(TrayUpdate::HotkeyChanged(config.hotkey.clone()));
+                }
             }
         }
 
@@ -325,6 +357,7 @@ fn run_vad_loop(
     let mut spectral_flatness_threshold = params.spectral_flatness_threshold;
     let mut noise_floor_multiplier = params.noise_floor_multiplier;
     let mut fft_planner = FftPlanner::new();
+    let mut enabled = true;
 
     while running.load(Ordering::Relaxed) {
         // Check for parameter updates
@@ -343,10 +376,26 @@ fn run_vad_loop(
                     spectral_flatness_threshold = new_sf_threshold;
                     noise_floor_multiplier = new_nf_multiplier;
                 }
+                VadCommand::SetEnabled(new_enabled) => {
+                    if !new_enabled && current_state == VoiceState::Speaking {
+                        // 禁用前通知主循环当前已静音
+                        let _ = vad_state_tx.try_send(VoiceState::Silent);
+                        current_state = VoiceState::Silent;
+                    }
+                    enabled = new_enabled;
+                    if enabled {
+                        // 重新启用时重置状态机
+                        state_machine.reset();
+                    }
+                }
             }
         }
 
         if let Some(frame) = frame_reader.next_frame() {
+            if !enabled {
+                // 禁用时仅排空 ring buffer，跳过检测
+                continue;
+            }
             // Compute RMS for noise floor tracking
             let rms = (frame.iter().map(|&s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
 

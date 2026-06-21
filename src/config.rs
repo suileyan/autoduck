@@ -26,6 +26,14 @@ fn default_noise_floor_multiplier() -> f32 {
     2.0
 }
 
+fn default_enabled() -> bool {
+    true
+}
+
+fn default_hotkey() -> String {
+    "Ctrl+Shift+D".to_string()
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AppConfig {
     pub duck_mode: DuckMode,
@@ -42,6 +50,10 @@ pub struct AppConfig {
     pub spectral_flatness_threshold: f32,
     #[serde(default = "default_noise_floor_multiplier")]
     pub noise_floor_multiplier: f32,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_hotkey")]
+    pub hotkey: String,
 }
 
 impl Default for AppConfig {
@@ -62,6 +74,8 @@ impl Default for AppConfig {
             restore_duration_ms: default_restore_duration_ms(),
             spectral_flatness_threshold: default_spectral_flatness_threshold(),
             noise_floor_multiplier: default_noise_floor_multiplier(),
+            enabled: default_enabled(),
+            hotkey: default_hotkey(),
         }
     }
 }

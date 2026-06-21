@@ -45,6 +45,13 @@ impl VadStateMachine {
         self.release_frames = frames;
     }
 
+    /// 重置状态机到初始 Silent 状态，清零计数器
+    pub fn reset(&mut self) {
+        self.state = VoiceState::Silent;
+        self.consecutive_voice = 0;
+        self.consecutive_silence = 0;
+    }
+
     /// Updates the state machine with a new VAD score and threshold.
     ///
     /// Returns `Some(VoiceState)` when a state transition occurs,

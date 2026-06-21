@@ -38,6 +38,8 @@ export component SettingsWindow inherits Window {
     in-out property <[AppEntry]> app-list: [];
     in-out property <string> new-app-name: "";
     in-out property <string> status-text: "";
+    in-out property <string> hotkey: "Ctrl+Shift+D";
+    callback hotkey-changed(string);
 
     VerticalBox {
         padding: 16px;
@@ -102,6 +104,33 @@ export component SettingsWindow inherits Window {
                                 changed(val) => { restore-duration-ms = round(val); }
                             }
                             Text { text: restore-duration-ms + "ms"; min-width: 50px; vertical-stretch: 0; }
+                        }
+                    }
+                }
+
+                // 快捷键
+                GroupBox {
+                    title: "快捷键";
+                    VerticalBox {
+                        spacing: 8px;
+
+                        HorizontalBox {
+                            Text { text: "切换快捷键:"; vertical-stretch: 0; min-width: 100px; }
+                            LineEdit {
+                                text: hotkey;
+                                edited(val) => {
+                                    hotkey = val;
+                                    hotkey-changed(val);
+                                }
+                            }
+                            Text { text: "（如 Ctrl+Shift+D）"; vertical-stretch: 0; vertical-alignment: center; color: #888888; }
+                        }
+                        Text {
+                            text: "按下快捷键可快速开启或关闭降音功能，留空则禁用快捷键";
+                            font-size: 11px;
+                            color: #888888;
+                            wrap: word-wrap;
+                            vertical-stretch: 0;
                         }
                     }
                 }

@@ -1,6 +1,11 @@
 use crate::config::DuckMode;
+use crate::hotkey::parse_hotkey;
 use anyhow::Result;
 use crossbeam_channel::Sender;
+use global_hotkey::{
+    hotkey::{Code, HotKey},
+    GlobalHotKeyManager, GlobalHotKeyEvent,
+};
 use muda::{
     CheckMenuItemBuilder, Menu, MenuId, MenuItemBuilder, PredefinedMenuItem, Submenu,
 };
@@ -13,6 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 // Fixed menu item IDs for event matching
+const ID_ENABLE: &str = "enable";
 const ID_MODE_GLOBAL: &str = "mode_global";
 const ID_MODE_APPS: &str = "mode_apps";
 const ID_AUTO_START: &str = "auto_start";
@@ -22,6 +28,7 @@ const ID_QUIT: &str = "quit";
 #[derive(Debug, Clone)]
 pub enum TrayEvent {
     Quit,
+    ToggleEnabled(bool),
     ToggleMode(DuckMode),
     ToggleAutoStart(bool),
     OpenSettings,
@@ -30,6 +37,8 @@ pub enum TrayEvent {
 #[derive(Debug, Clone)]
 pub enum TrayUpdate {
     Crashed,
+    EnabledChanged(bool),
+    HotkeyChanged(String),
 }
 
 pub struct TrayApp {
@@ -37,9 +46,12 @@ pub struct TrayApp {
     event_sender: Sender<TrayEvent>,
     #[allow(dead_code)] // Used by rebuild_menu for future menu updates
     current_mode: DuckMode,
+    enabled: bool,
     auto_start_enabled: bool,
     crashed: bool,
     update_rx: crossbeam_channel::Receiver<TrayUpdate>,
+    hotkey_manager: GlobalHotKeyManager,
+    current_hotkey_id: Option<u32>,
 }
 
 impl TrayApp {
@@ -47,6 +59,8 @@ impl TrayApp {
         event_sender: Sender<TrayEvent>,
         mode: DuckMode,
         auto_start: bool,
+        enabled: bool,
+        hotkey_str: &str,
         update_rx: crossbeam_channel::Receiver<TrayUpdate>,
     ) -> Result<Self> {
         // Load icon from embedded PNG
@@ -58,42 +72,81 @@ impl TrayApp {
         let info = reader.next_frame(&mut buf)?;
         let icon = Icon::from_rgba(buf, info.width, info.height)?;
 
-        let menu = Self::build_menu_inner(mode, auto_start);
+        let menu = Self::build_menu_inner(enabled, mode, auto_start);
 
         let tray_icon = TrayIconBuilder::new()
-            .with_tooltip("AutoDuck")
+            .with_tooltip(if enabled { "AutoDuck" } else { "AutoDuck - 已暂停" })
             .with_icon(icon)
             .with_menu(Box::new(menu))
             .build()?;
 
-        Ok(Self {
+        let hotkey_manager = GlobalHotKeyManager::new()?;
+        let mut app = Self {
             tray_icon,
             event_sender,
             current_mode: mode,
+            enabled,
             auto_start_enabled: auto_start,
             crashed: false,
             update_rx,
-        })
+            hotkey_manager,
+            current_hotkey_id: None,
+        };
+
+        // 注册初始快捷键
+        app.register_hotkey(hotkey_str)?;
+
+        Ok(app)
+    }
+
+    fn register_hotkey(&mut self, hotkey_str: &str) -> Result<()> {
+        // 先注销旧快捷键
+        if let Some(_id) = self.current_hotkey_id.take() {
+            let old = HotKey::new(None, Code::KeyA);
+            // HotKey 的 id 是自动生成的，需要通过 id 来注销
+            // unregister 接受 HotKey，但实际匹配的是 id
+            // 由于 API 限制，我们直接用 manager 的方式
+            let _ = self.hotkey_manager.unregister(old);
+        }
+
+        if hotkey_str.trim().is_empty() {
+            return Ok(());
+        }
+
+        if let Some((modifiers, code)) = parse_hotkey(hotkey_str) {
+            let hotkey = HotKey::new(Some(modifiers), code);
+            self.hotkey_manager.register(hotkey)?;
+            self.current_hotkey_id = Some(hotkey.id());
+        }
+
+        Ok(())
     }
 
     #[allow(dead_code)]
     pub fn build_menu(&self) -> Menu {
-        Self::build_menu_inner(self.current_mode, self.auto_start_enabled)
+        Self::build_menu_inner(self.enabled, self.current_mode, self.auto_start_enabled)
     }
 
-    fn build_menu_inner(mode: DuckMode, auto_start: bool) -> Menu {
+    fn build_menu_inner(enabled: bool, mode: DuckMode, auto_start: bool) -> Menu {
+        let enable_item = CheckMenuItemBuilder::new()
+            .id(MenuId::new(ID_ENABLE))
+            .text("启用降音")
+            .enabled(true)
+            .checked(enabled)
+            .build();
+
         let mode_global = CheckMenuItemBuilder::new()
             .id(MenuId::new(ID_MODE_GLOBAL))
             .text("全局降音")
-            .enabled(true)
-            .checked(mode == DuckMode::Global)
+            .enabled(enabled)
+            .checked(enabled && mode == DuckMode::Global)
             .build();
 
         let mode_apps = CheckMenuItemBuilder::new()
             .id(MenuId::new(ID_MODE_APPS))
             .text("应用排除")
-            .enabled(true)
-            .checked(mode == DuckMode::Apps)
+            .enabled(enabled)
+            .checked(enabled && mode == DuckMode::Apps)
             .build();
 
         let auto_start_item = CheckMenuItemBuilder::new()
@@ -117,7 +170,7 @@ impl TrayApp {
 
         let mode_submenu = Submenu::with_items(
             "降音模式",
-            true,
+            enabled,
             &[
                 &mode_global,
                 &PredefinedMenuItem::separator(),
@@ -127,6 +180,8 @@ impl TrayApp {
         .expect("failed to create mode submenu");
 
         let menu = Menu::new();
+        menu.append(&enable_item)
+            .expect("failed to append enable item");
         menu.append(&mode_submenu)
             .expect("failed to append mode submenu");
         menu.append(&PredefinedMenuItem::separator())
@@ -143,7 +198,6 @@ impl TrayApp {
         menu
     }
 
-    #[allow(dead_code)]
     fn rebuild_menu(&self) {
         let menu = self.build_menu();
         self.tray_icon.set_menu(Some(Box::new(menu)));
@@ -152,6 +206,12 @@ impl TrayApp {
     pub fn set_crashed(&mut self) {
         self.crashed = true;
         let _ = self.tray_icon.set_tooltip(Some("AutoDuck - 已停止工作"));
+    }
+
+    pub fn update_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        let _ = self.tray_icon.set_tooltip(Some(if enabled { "AutoDuck" } else { "AutoDuck - 已暂停" }));
+        self.rebuild_menu();
     }
 
     #[allow(dead_code)]
@@ -167,7 +227,11 @@ impl TrayApp {
     }
 
     fn handle_menu_event(&mut self, event: muda::MenuEvent) {
-        if event.id == MenuId::new(ID_MODE_GLOBAL) {
+        if event.id == MenuId::new(ID_ENABLE) {
+            let new_enabled = !self.enabled;
+            self.enabled = new_enabled;
+            let _ = self.event_sender.send(TrayEvent::ToggleEnabled(new_enabled));
+        } else if event.id == MenuId::new(ID_MODE_GLOBAL) {
             let _ = self.event_sender.send(TrayEvent::ToggleMode(DuckMode::Global));
         } else if event.id == MenuId::new(ID_MODE_APPS) {
             let _ = self.event_sender.send(TrayEvent::ToggleMode(DuckMode::Apps));
@@ -189,10 +253,12 @@ pub fn run_tray(
     event_sender: Sender<TrayEvent>,
     mode: DuckMode,
     auto_start: bool,
+    enabled: bool,
+    hotkey: String,
     running: Arc<AtomicBool>,
     tray_update_rx: crossbeam_channel::Receiver<TrayUpdate>,
 ) -> Result<()> {
-    let mut app = TrayApp::new(event_sender, mode, auto_start, tray_update_rx)?;
+    let mut app = TrayApp::new(event_sender, mode, auto_start, enabled, &hotkey, tray_update_rx)?;
 
     while running.load(Ordering::Relaxed) {
         // Process Windows messages
@@ -209,10 +275,24 @@ pub fn run_tray(
             app.handle_menu_event(event);
         }
 
+        // Check for global hotkey events
+        if let Ok(_event) = GlobalHotKeyEvent::receiver().try_recv() {
+            // 快捷键触发时切换启用/禁用状态
+            let new_enabled = !app.enabled;
+            app.enabled = new_enabled;
+            let _ = app.event_sender.send(TrayEvent::ToggleEnabled(new_enabled));
+        }
+
         // Check for tray updates from main loop
         if let Ok(update) = app.update_rx.try_recv() {
             match update {
                 TrayUpdate::Crashed => app.set_crashed(),
+                TrayUpdate::EnabledChanged(enabled) => app.update_enabled(enabled),
+                TrayUpdate::HotkeyChanged(hotkey) => {
+                    if let Err(e) = app.register_hotkey(&hotkey) {
+                        eprintln!("注册快捷键失败: {}", e);
+                    }
+                }
             }
         }
 

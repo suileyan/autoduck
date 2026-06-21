@@ -13,6 +13,7 @@ slint::include_modules!();
 pub enum GuiMessage {
     ConfigChanged(AppConfig),
     RefreshApps,
+    HotkeyChanged(String),
 }
 
 /// Message sent from main loop to GUI
@@ -53,6 +54,7 @@ impl GuiApp {
         window.set_restore_duration_ms(config.restore_duration_ms as i32);
         window.set_spectral_flatness_threshold(config.spectral_flatness_threshold);
         window.set_noise_floor_multiplier(config.noise_floor_multiplier);
+        window.set_hotkey(config.hotkey.clone().into());
 
         // Set initial excluded apps
         let app_entries: Vec<AppEntry> = config
@@ -95,8 +97,7 @@ impl GuiApp {
             win.set_restore_duration_ms(default.restore_duration_ms as i32);
             win.set_spectral_flatness_threshold(default.spectral_flatness_threshold);
             win.set_noise_floor_multiplier(default.noise_floor_multiplier);
-
-            // Reset the app list to default excluded apps
+            win.set_hotkey(default.hotkey.clone().into());
             let entries: Vec<AppEntry> = default
                 .excluded_apps
                 .iter()
@@ -169,7 +170,7 @@ impl GuiApp {
         });
 
         // --- Callback: Refresh Apps ---
-        let sender_refresh = sender;
+        let sender_refresh = sender.clone();
         window.on_refresh_apps(move || {
             let _ = sender_refresh.send(GuiMessage::RefreshApps);
         });
@@ -194,6 +195,12 @@ impl GuiApp {
                     win.set_release_frames(frames as i32);
                 }
             }
+        });
+
+        // --- Callback: Hotkey changed ---
+        let sender_hotkey = sender.clone();
+        window.on_hotkey_changed(move |val: slint::SharedString| {
+            let _ = sender_hotkey.send(GuiMessage::HotkeyChanged(val.to_string()));
         });
 
         // --- Intercept window close: use Win32 SW_HIDE instead of slint hide() ---
@@ -250,6 +257,7 @@ impl GuiApp {
                         win.set_restore_duration_ms(config.restore_duration_ms as i32);
                         win.set_spectral_flatness_threshold(config.spectral_flatness_threshold);
                         win.set_noise_floor_multiplier(config.noise_floor_multiplier);
+                        win.set_hotkey(config.hotkey.clone().into());
                     }
                     GuiUpdate::ShowSettings => {
                         // Show the window using Win32 ShowWindow(SW_SHOW)
@@ -325,6 +333,8 @@ impl AppConfig {
             restore_duration_ms: win.get_restore_duration_ms() as u32,
             spectral_flatness_threshold: win.get_spectral_flatness_threshold(),
             noise_floor_multiplier: win.get_noise_floor_multiplier(),
+            enabled: true, // enabled 由托盘/快捷键控制，不从窗口读取
+            hotkey: win.get_hotkey().to_string(),
         }
     }
 }
