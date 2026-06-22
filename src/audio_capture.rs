@@ -5,6 +5,9 @@ use rubato::{FftFixedInOut, Resampler};
 const VAD_SAMPLE_RATE: u32 = 16000;
 const VAD_FRAME_SIZE: usize = 256;
 
+/// 每帧时长（毫秒）= VAD_FRAME_SIZE / VAD_SAMPLE_RATE * 1000
+pub const VAD_FRAME_DURATION_MS: u32 = VAD_FRAME_SIZE as u32 * 1000 / VAD_SAMPLE_RATE;
+
 /// Audio capture that writes raw mono f32 samples (at native sample rate)
 /// into an rtrb ring buffer from the audio callback thread.
 pub struct AudioCapture {
@@ -62,20 +65,37 @@ impl AudioCapture {
             cpal::SampleFormat::F32 => device.build_input_stream(
                 &config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    let mono = downmix_to_mono_f32(data, channels);
-                    push_samples(&mut producer, &mono);
+                    if channels == 1 {
+                        push_samples(&mut producer, data);
+                    } else {
+                        let frame_count = data.len() / channels;
+                        for frame_idx in 0..frame_count {
+                            let offset = frame_idx * channels;
+                            let sum: f32 = (0..channels).map(|ch| data[offset + ch]).sum();
+                            push_sample(&mut producer, sum / channels as f32);
+                        }
+                    }
                 },
-                |err| eprintln!("Audio stream error: {}", err),
+                |err| crate::dbg_output(&format!("Audio stream error: {}", err)),
                 None,
             )?,
             cpal::SampleFormat::I16 => device.build_input_stream(
                 &config,
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                    let f32_data: Vec<f32> = data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
-                    let mono = downmix_to_mono_f32(&f32_data, channels);
-                    push_samples(&mut producer, &mono);
+                    if channels == 1 {
+                        for &s in data {
+                            push_sample(&mut producer, s as f32 / i16::MAX as f32);
+                        }
+                    } else {
+                        let frame_count = data.len() / channels;
+                        for frame_idx in 0..frame_count {
+                            let offset = frame_idx * channels;
+                            let sum: f32 = (0..channels).map(|ch| data[offset + ch] as f32 / i16::MAX as f32).sum();
+                            push_sample(&mut producer, sum / channels as f32);
+                        }
+                    }
                 },
-                |err| eprintln!("Audio stream error: {}", err),
+                |err| crate::dbg_output(&format!("Audio stream error: {}", err)),
                 None,
             )?,
             _ => return Err(anyhow::anyhow!("Unsupported sample format")),
@@ -101,19 +121,11 @@ impl AudioCapture {
     }
 }
 
-/// Downmix multi-channel interleaved f32 samples to mono by averaging channels.
-fn downmix_to_mono_f32(data: &[f32], channels: usize) -> Vec<f32> {
-    if channels == 1 {
-        return data.to_vec();
+/// Push a single sample into the ring buffer, dropping if full.
+fn push_sample(producer: &mut Producer<f32>, s: f32) {
+    if producer.push(s).is_err() {
+        // Ring buffer full — drop the incoming sample.
     }
-    let frame_count = data.len() / channels;
-    let mut mono = Vec::with_capacity(frame_count);
-    for frame_idx in 0..frame_count {
-        let offset = frame_idx * channels;
-        let sum: f32 = (0..channels).map(|ch| data[offset + ch]).sum();
-        mono.push(sum / channels as f32);
-    }
-    mono
 }
 
 /// Push samples into the ring buffer, dropping any that don't fit.
@@ -149,6 +161,9 @@ pub struct FrameReader {
     consumer: Consumer<f32>,
     resample_state: ResampleState,
     frame_buffer: Vec<f32>,
+    raw_buffer: Vec<f32>,
+    resample_output: Vec<f32>,
+    output_frame: Vec<f32>,
 }
 
 impl FrameReader {
@@ -174,57 +189,60 @@ impl FrameReader {
             consumer,
             resample_state,
             frame_buffer: Vec::with_capacity(VAD_FRAME_SIZE * 2),
+            raw_buffer: Vec::with_capacity(4096),
+            resample_output: Vec::with_capacity(4096),
+            output_frame: vec![0.0f32; VAD_FRAME_SIZE],
         }
     }
 
     /// Attempt to return the next VAD frame (256 samples at 16 kHz).
     /// Returns `None` if not enough resampled samples are available yet.
-    pub fn next_frame(&mut self) -> Option<Vec<f32>> {
+    pub fn next_frame(&mut self) -> Option<&[f32]> {
         // Drain all available samples from the ring buffer.
-        let mut raw = Vec::new();
+        self.raw_buffer.clear();
         while let Ok(s) = self.consumer.pop() {
-            raw.push(s);
+            self.raw_buffer.push(s);
         }
-        if raw.is_empty() && self.frame_buffer.len() < VAD_FRAME_SIZE {
+        if self.raw_buffer.is_empty() && self.frame_buffer.len() < VAD_FRAME_SIZE {
             return None;
         }
 
         // Resample the newly arrived samples.
-        let resampled = self.resample(&raw);
-        self.frame_buffer.extend_from_slice(&resampled);
+        let raw = std::mem::take(&mut self.raw_buffer);
+        self.resample(&raw);
+        self.raw_buffer = raw;
 
         if self.frame_buffer.len() >= VAD_FRAME_SIZE {
-            let frame: Vec<f32> = self.frame_buffer.drain(..VAD_FRAME_SIZE).collect();
-            Some(frame)
+            self.output_frame.copy_from_slice(&self.frame_buffer[..VAD_FRAME_SIZE]);
+            self.frame_buffer.drain(..VAD_FRAME_SIZE);
+            Some(&self.output_frame)
         } else {
             None
         }
     }
 
-    fn resample(&mut self, raw: &[f32]) -> Vec<f32> {
+    fn resample(&mut self, raw: &[f32]) {
         match &mut self.resample_state {
-            ResampleState::Passthrough => raw.to_vec(),
-            ResampleState::IntegerDecimation { ratio } => decimate_integer(raw, *ratio),
+            ResampleState::Passthrough => {
+                self.frame_buffer.extend_from_slice(raw);
+            }
+            ResampleState::IntegerDecimation { ratio } => {
+                self.resample_output.clear();
+                decimate_integer(raw, *ratio, &mut self.resample_output);
+                self.frame_buffer.extend_from_slice(&self.resample_output);
+            }
             ResampleState::Rubato {
                 resampler,
                 input_buffer,
             } => {
-                // FftFixedInOut processes fixed-size chunks with no output delay:
-                // each process() call produces exactly output_frames_next() samples
-                // for input_frames_next() input samples, with no cross-call state
-                // needed beyond input_buffer for partial chunks.
                 input_buffer.extend_from_slice(raw);
-                let mut output = Vec::new();
-
                 let chunk_size = resampler.input_frames_next();
                 while input_buffer.len() >= chunk_size {
                     let chunk: Vec<f32> = input_buffer.drain(..chunk_size).collect();
                     let input_channels = vec![chunk];
                     let resampled_channels = resampler.process(&input_channels, None).unwrap();
-                    output.extend_from_slice(&resampled_channels[0]);
+                    self.frame_buffer.extend_from_slice(&resampled_channels[0]);
                 }
-
-                output
             }
         }
     }
@@ -232,13 +250,12 @@ impl FrameReader {
 
 /// Simple integer-ratio decimation with averaging low-pass filter.
 /// For ratio R, every R consecutive samples are averaged to produce 1 output sample.
-fn decimate_integer(samples: &[f32], ratio: usize) -> Vec<f32> {
+fn decimate_integer(samples: &[f32], ratio: usize, out: &mut Vec<f32>) {
     let frame_count = samples.len() / ratio;
-    let mut out = Vec::with_capacity(frame_count);
+    out.reserve(frame_count);
     for i in 0..frame_count {
         let offset = i * ratio;
         let sum: f32 = (0..ratio).map(|j| samples[offset + j]).sum();
         out.push(sum / ratio as f32);
     }
-    out
 }

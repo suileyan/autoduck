@@ -123,69 +123,73 @@ impl NoiseFloorTracker {
     }
 }
 
-/// Compute spectral flatness of a frame.
-/// Returns a value in [0, 1] where 1 = white noise (flat spectrum), 0 = pure tone.
-/// Uses FFT to compute power spectrum, then geometric mean / arithmetic mean.
-pub fn spectral_flatness(frame: &[f32], planner: &mut rustfft::FftPlanner<f32>) -> f32 {
-    use rustfft::num_complex::Complex;
+const VAD_FRAME_SIZE: usize = 256;
 
-    let len = frame.len();
-    if len == 0 {
-        return 0.0;
+/// Reusable buffers for spectral flatness computation, avoiding per-frame heap allocations.
+pub struct SpectralFlatnessState {
+    windowed: Vec<f32>,
+    fft_input: Vec<rustfft::num_complex::Complex<f32>>,
+    power: Vec<f32>,
+}
+
+impl SpectralFlatnessState {
+    pub fn new() -> Self {
+        Self {
+            windowed: Vec::with_capacity(VAD_FRAME_SIZE),
+            fft_input: Vec::with_capacity(VAD_FRAME_SIZE),
+            power: Vec::with_capacity(VAD_FRAME_SIZE),
+        }
     }
 
-    // Apply Hann window to reduce spectral leakage
-    let windowed: Vec<f32> = frame
-        .iter()
-        .enumerate()
-        .map(|(i, &s)| {
-            let w =
-                0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (len - 1) as f32).cos());
+    /// Compute spectral flatness of a frame.
+    /// Returns a value in [0, 1] where 1 = white noise (flat spectrum), 0 = pure tone.
+    pub fn compute(&mut self, frame: &[f32], planner: &mut rustfft::FftPlanner<f32>) -> f32 {
+        use rustfft::num_complex::Complex;
+
+        let len = frame.len();
+        if len == 0 {
+            return 0.0;
+        }
+
+        // Apply Hann window to reduce spectral leakage
+        self.windowed.clear();
+        self.windowed.extend(frame.iter().enumerate().map(|(i, &s)| {
+            let w = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (len - 1) as f32).cos());
             s * w
-        })
-        .collect();
+        }));
 
-    // Prepare FFT input (zero-pad to next power of 2 if needed)
-    let fft_len = windowed.len().next_power_of_two();
-    let mut fft_input: Vec<Complex<f32>> =
-        windowed.iter().map(|&s| Complex::new(s, 0.0)).collect();
-    fft_input.resize(fft_len, Complex::new(0.0, 0.0));
+        // Prepare FFT input (zero-pad to next power of 2 if needed)
+        let fft_len = self.windowed.len().next_power_of_two();
+        self.fft_input.clear();
+        self.fft_input.extend(self.windowed.iter().map(|&s| Complex::new(s, 0.0)));
+        self.fft_input.resize(fft_len, Complex::new(0.0, 0.0));
 
-    let fft = planner.plan_fft_forward(fft_len);
-    fft.process(&mut fft_input);
+        let fft = planner.plan_fft_forward(fft_len);
+        fft.process(&mut self.fft_input);
 
-    // Compute power spectrum (only first half - positive frequencies)
-    let half_len = fft_len / 2;
-    let power: Vec<f32> = fft_input[..half_len]
-        .iter()
-        .map(|c| c.norm_sqr() / fft_len as f32)
-        .collect();
+        // Compute power spectrum (only first half - positive frequencies)
+        let half_len = fft_len / 2;
+        self.power.clear();
+        self.power.extend(self.fft_input[..half_len].iter().map(|c| c.norm_sqr() / fft_len as f32));
 
-    if power.is_empty() {
-        return 0.0;
+        if self.power.is_empty() {
+            return 0.0;
+        }
+
+        // Arithmetic mean of power spectrum
+        let arith_mean: f32 = self.power.iter().sum::<f32>() / self.power.len() as f32;
+        if arith_mean <= f32::EPSILON {
+            return 0.0;
+        }
+
+        // Geometric mean of power spectrum (use log to avoid overflow)
+        let log_sum: f32 = self.power.iter().map(|&p| {
+            if p > f32::EPSILON { p.ln() } else { f32::MIN_POSITIVE.ln() }
+        }).sum();
+        let geo_mean = (log_sum / self.power.len() as f32).exp();
+
+        (geo_mean / arith_mean).clamp(0.0, 1.0)
     }
-
-    // Arithmetic mean of power spectrum
-    let arith_mean: f32 = power.iter().sum::<f32>() / power.len() as f32;
-    if arith_mean <= f32::EPSILON {
-        return 0.0;
-    }
-
-    // Geometric mean of power spectrum (use log to avoid overflow)
-    let log_sum: f32 = power
-        .iter()
-        .map(|&p| {
-            if p > f32::EPSILON {
-                p.ln()
-            } else {
-                f32::MIN_POSITIVE.ln()
-            }
-        })
-        .sum();
-    let geo_mean = (log_sum / power.len() as f32).exp();
-
-    // Spectral flatness = geo_mean / arith_mean
-    (geo_mean / arith_mean).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]

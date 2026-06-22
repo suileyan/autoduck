@@ -21,7 +21,7 @@ use config::AppConfig;
 use config::DuckMode;
 use gui::{GuiApp, GuiMessage, GuiUpdate};
 use tray_icon::{TrayEvent, TrayUpdate};
-use vad_state::{VadStateMachine, VoiceState, NoiseFloorTracker, spectral_flatness};
+use vad_state::{VadStateMachine, VoiceState, NoiseFloorTracker, SpectralFlatnessState};
 use rustfft::FftPlanner;
 use volume_control::VolumeController;
 use volume_worker::{VolumeCommand, VolumeWorker};
@@ -49,6 +49,17 @@ struct VadParams {
     spectral_flatness_threshold: f32,
     /// Multiplier applied to the noise floor RMS to compute the effective VAD threshold.
     noise_floor_multiplier: f32,
+}
+
+/// 安全的调试输出，使用 OutputDebugStringW
+/// 替代 eprintln!，确保在 windows_subsystem = "windows" 模式下仍可查看
+pub fn dbg_output(s: &str) {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
+    let wide: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        OutputDebugStringW(PCWSTR(wide.as_ptr()));
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -140,7 +151,7 @@ fn main() -> anyhow::Result<()> {
         .name("tray".into())
         .spawn(move || {
             if let Err(e) = tray_icon::run_tray(tray_event_tx_clone, tray_mode, auto_start, tray_enabled, tray_hotkey, running_tray, tray_update_rx) {
-                eprintln!("托盘线程错误: {}", e);
+                crate::dbg_output(&format!("托盘线程错误: {}", e));
             }
         })?;
 
@@ -155,159 +166,156 @@ fn main() -> anyhow::Result<()> {
     }
 
     loop {
-        // 检查崩溃通知
-        if let Ok(crash_msg) = crash_rx.try_recv() {
-            eprintln!("工作线程崩溃: {}", crash_msg);
-            // 通知托盘显示崩溃状态
-            let _ = tray_update_tx.send(TrayUpdate::Crashed);
-            // 退出前先恢复音量，使用 ack 确认完成
-            let (ack_tx, ack_rx) = crossbeam_channel::bounded::<()>(1);
-            let _ = volume_cmd_tx.send(VolumeCommand::Restore { ack: Some(ack_tx) });
-            let _ = ack_rx.recv_timeout(std::time::Duration::from_secs(5));
-            break;
-        }
-
-        // 处理 VAD 状态变化
-        if let Ok(new_state) = vad_state_rx.try_recv() {
-            if new_state != current_voice_state {
-                current_voice_state = new_state;
-                match new_state {
-                    VoiceState::Speaking => {
-                        let _ = volume_cmd_tx.send(VolumeCommand::Duck);
-                    }
-                    VoiceState::Silent => {
-                        let _ = volume_cmd_tx.send(VolumeCommand::Restore { ack: None });
+        crossbeam_channel::select! {
+            recv(crash_rx) -> msg => {
+                let crash_msg = match msg {
+                    Ok(m) => m,
+                    Err(_) => break,
+                };
+                crate::dbg_output(&format!("工作线程崩溃: {}", crash_msg));
+                // 通知托盘显示崩溃状态
+                let _ = tray_update_tx.send(TrayUpdate::Crashed);
+                // 退出前先恢复音量，使用 ack 确认完成
+                let (ack_tx, ack_rx) = crossbeam_channel::bounded::<()>(1);
+                let _ = volume_cmd_tx.send(VolumeCommand::Restore { ack: Some(ack_tx) });
+                let _ = ack_rx.recv_timeout(std::time::Duration::from_secs(5));
+                break;
+            }
+            recv(vad_state_rx) -> msg => {
+                if let Ok(new_state) = msg {
+                    if new_state != current_voice_state {
+                        current_voice_state = new_state;
+                        match new_state {
+                            VoiceState::Speaking => {
+                                let _ = volume_cmd_tx.send(VolumeCommand::Duck);
+                            }
+                            VoiceState::Silent => {
+                                let _ = volume_cmd_tx.send(VolumeCommand::Restore { ack: None });
+                            }
+                        }
                     }
                 }
             }
-        }
-
-        // 处理托盘事件
-        if let Ok(event) = tray_event_rx.try_recv() {
-            match event {
-                TrayEvent::Quit => {
-                    // 退出前先恢复音量，使用 ack 确认完成
-                    let (ack_tx, ack_rx) = crossbeam_channel::bounded::<()>(1);
-                    let _ = volume_cmd_tx.send(VolumeCommand::Restore { ack: Some(ack_tx) });
-                    let _ = ack_rx.recv_timeout(std::time::Duration::from_secs(5));
-                    running.store(false, Ordering::Relaxed);
-                    let _ = volume_cmd_tx.send(VolumeCommand::Stop);
-                    break;
-                }
-                TrayEvent::ToggleEnabled(enabled) => {
-                    _vad_enabled = enabled;
-                    config.enabled = enabled;
-                    if let Err(e) = config.save(&config_path) {
-                        eprintln!("保存配置失败: {}", e);
+            recv(tray_event_rx) -> msg => {
+                let event = match msg {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                match event {
+                    TrayEvent::Quit => {
+                        let (ack_tx, ack_rx) = crossbeam_channel::bounded::<()>(1);
+                        let _ = volume_cmd_tx.send(VolumeCommand::Restore { ack: Some(ack_tx) });
+                        let _ = ack_rx.recv_timeout(std::time::Duration::from_secs(5));
+                        running.store(false, Ordering::Relaxed);
+                        let _ = volume_cmd_tx.send(VolumeCommand::Stop);
+                        break;
                     }
-                    if enabled {
-                        let _ = vad_cmd_tx.send(VadCommand::SetEnabled(true));
-                    } else {
-                        let _ = vad_cmd_tx.send(VadCommand::SetEnabled(false));
-                        // 禁用时恢复音量
-                        let _ = volume_cmd_tx.send(VolumeCommand::Restore { ack: None });
-                    }
-                    let _ = tray_update_tx.send(TrayUpdate::EnabledChanged(enabled));
-                }
-                TrayEvent::ToggleMode(mode) => {
-                    config.duck_mode = mode;
-                    if let Err(e) = config.save(&config_path) {
-                        eprintln!("保存配置失败: {}", e);
-                    }
-                    let _ = volume_cmd_tx.send(VolumeCommand::UpdateConfig(config.clone()));
-                }
-                TrayEvent::ToggleAutoStart(enable) => {
-                    if enable {
-                        if let Err(e) = autostart::enable_auto_start() {
-                            eprintln!("启用开机自启失败: {}", e);
+                    TrayEvent::ToggleEnabled(enabled) => {
+                        _vad_enabled = enabled;
+                        config.enabled = enabled;
+                        if let Err(e) = config.save(&config_path) {
+                            crate::dbg_output(&format!("保存配置失败: {}", e));
                         }
-                    } else {
-                        if let Err(e) = autostart::disable_auto_start() {
-                            eprintln!("禁用开机自启失败: {}", e);
+                        if enabled {
+                            let _ = vad_cmd_tx.send(VadCommand::SetEnabled(true));
+                        } else {
+                            let _ = vad_cmd_tx.send(VadCommand::SetEnabled(false));
+                            let _ = volume_cmd_tx.send(VolumeCommand::Restore { ack: None });
+                        }
+                        let _ = tray_update_tx.send(TrayUpdate::EnabledChanged(enabled));
+                    }
+                    TrayEvent::ToggleMode(mode) => {
+                        config.duck_mode = mode;
+                        if let Err(e) = config.save(&config_path) {
+                            crate::dbg_output(&format!("保存配置失败: {}", e));
+                        }
+                        let _ = volume_cmd_tx.send(VolumeCommand::UpdateConfig(config.clone()));
+                    }
+                    TrayEvent::ToggleAutoStart(enable) => {
+                        if enable {
+                            if let Err(e) = autostart::enable_auto_start() {
+                                crate::dbg_output(&format!("启用开机自启失败: {}", e));
+                            }
+                        } else {
+                            if let Err(e) = autostart::disable_auto_start() {
+                                crate::dbg_output(&format!("禁用开机自启失败: {}", e));
+                            }
                         }
                     }
-                }
-                TrayEvent::OpenSettings => {
-                    // GUI 线程只创建一次，持久运行
-                    // 窗口关闭时通过 Win32 SW_HIDE 隐藏（不退出事件循环）
-                    // 再次打开时通过 GuiUpdate::ShowSettings 恢复显示
-                    if gui_handle.is_none() {
-                        let gui_config = config.clone();
-                        let gui_msg_tx = gui_msg_tx.clone();
-                        let gui_update_rx = gui_update_rx.clone();
-                        let handle = std::thread::Builder::new()
-                            .name("gui".into())
-                            .spawn(move || {
-                                match GuiApp::new(&gui_config, gui_msg_tx, gui_update_rx) {
-                                    Ok(gui) => {
-                                        gui.show();
-                                        let _ = slint::run_event_loop_until_quit();
+                    TrayEvent::OpenSettings => {
+                        if gui_handle.is_none() {
+                            let gui_config = config.clone();
+                            let gui_msg_tx = gui_msg_tx.clone();
+                            let gui_update_rx = gui_update_rx.clone();
+                            let handle = std::thread::Builder::new()
+                                .name("gui".into())
+                                .spawn(move || {
+                                    match GuiApp::new(&gui_config, gui_msg_tx, gui_update_rx) {
+                                        Ok(gui) => {
+                                            gui.show();
+                                            let _ = slint::run_event_loop_until_quit();
+                                        }
+                                        Err(e) => {
+                                            crate::dbg_output(&format!("创建设置窗口失败: {}", e));
+                                        }
                                     }
-                                    Err(e) => {
-                                        eprintln!("创建设置窗口失败: {}", e);
-                                    }
-                                }
-                            });
-                        if let Ok(h) = handle {
-                            gui_handle = Some(h);
+                                });
+                            if let Ok(h) = handle {
+                                gui_handle = Some(h);
+                            }
+                        } else {
+                            let _ = gui_update_tx.send(GuiUpdate::ShowSettings);
                         }
-                    } else {
-                        // GUI 线程已在运行，通知显示窗口
-                        let _ = gui_update_tx.send(GuiUpdate::ShowSettings);
                     }
                 }
             }
-        }
-
-        // 处理 GUI 消息
-        if let Ok(msg) = gui_msg_rx.try_recv() {
-            match msg {
-                GuiMessage::ConfigChanged(new_config) => {
-                    // Save config
-                    if let Err(e) = new_config.save(&config_path) {
-                        eprintln!("保存配置失败: {}", e);
+            recv(gui_msg_rx) -> msg => {
+                let msg = match msg {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                match msg {
+                    GuiMessage::ConfigChanged(new_config) => {
+                        if let Err(e) = new_config.save(&config_path) {
+                            crate::dbg_output(&format!("保存配置失败: {}", e));
+                        }
+                        config = new_config.clone();
+                        let _ = volume_cmd_tx.send(VolumeCommand::UpdateConfig(new_config.clone()));
+                        let _ = vad_cmd_tx.send(VadCommand::UpdateParams {
+                            threshold: new_config.vad_threshold,
+                            attack_frames: new_config.attack_frames,
+                            release_frames: new_config.release_frames,
+                            spectral_flatness_threshold: new_config.spectral_flatness_threshold,
+                            noise_floor_multiplier: new_config.noise_floor_multiplier,
+                        });
                     }
-                    // Update running config
-                    config = new_config.clone();
-                    // Notify volume worker
-                    let _ = volume_cmd_tx.send(VolumeCommand::UpdateConfig(new_config.clone()));
-                    // Update VAD parameters
-                    let _ = vad_cmd_tx.send(VadCommand::UpdateParams {
-                        threshold: new_config.vad_threshold,
-                        attack_frames: new_config.attack_frames,
-                        release_frames: new_config.release_frames,
-                        spectral_flatness_threshold: new_config.spectral_flatness_threshold,
-                        noise_floor_multiplier: new_config.noise_floor_multiplier,
-                    });
-                }
-                GuiMessage::RefreshApps => {
-                    // Enumerate audio sessions
-                    let session_names = volume_control::enumerate_audio_session_names();
-                    // Build app list: (name, is_excluded) — case-insensitive comparison
-                    let apps: Vec<(String, bool)> = session_names.into_iter().map(|name| {
-                        let excluded = config.excluded_apps.iter().any(|excluded| excluded.eq_ignore_ascii_case(&name));
-                        (name, excluded)
-                    }).collect();
-                    // Send to GUI thread
-                    let _ = gui_update_tx.send(GuiUpdate::AppList(apps));
-                }
-                GuiMessage::HotkeyChanged(hotkey) => {
-                    config.hotkey = hotkey;
-                    if let Err(e) = config.save(&config_path) {
-                        eprintln!("保存配置失败: {}", e);
+                    GuiMessage::RefreshApps => {
+                        let session_names = volume_control::enumerate_audio_session_names();
+                        let apps: Vec<(String, bool)> = session_names.into_iter().map(|name| {
+                            let excluded = config.excluded_apps.iter().any(|excluded| excluded.eq_ignore_ascii_case(&name));
+                            (name, excluded)
+                        }).collect();
+                        let _ = gui_update_tx.send(GuiUpdate::AppList(apps));
                     }
-                    let _ = tray_update_tx.send(TrayUpdate::HotkeyChanged(config.hotkey.clone()));
-                }
-                GuiMessage::SuspendHotkey(hotkey) => {
-                    let _ = tray_update_tx.send(TrayUpdate::SuspendHotkey(hotkey));
-                }
-                GuiMessage::RestoreHotkey(hotkey) => {
-                    let _ = tray_update_tx.send(TrayUpdate::RestoreHotkey(hotkey));
+                    GuiMessage::HotkeyChanged(hotkey) => {
+                        config.hotkey = hotkey;
+                        if let Err(e) = config.save(&config_path) {
+                            crate::dbg_output(&format!("保存配置失败: {}", e));
+                        }
+                        let _ = tray_update_tx.send(TrayUpdate::HotkeyChanged(config.hotkey.clone()));
+                    }
+                    GuiMessage::SuspendHotkey(hotkey) => {
+                        let _ = tray_update_tx.send(TrayUpdate::SuspendHotkey(hotkey));
+                    }
+                    GuiMessage::RestoreHotkey(hotkey) => {
+                        let _ = tray_update_tx.send(TrayUpdate::RestoreHotkey(hotkey));
+                    }
                 }
             }
+            default(std::time::Duration::from_secs(30)) => {
+                // 安全网：所有 channel 30 秒内无消息时唤醒，防止永久阻塞
+            }
         }
-
-        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
     // 等待线程退出
@@ -318,7 +326,7 @@ fn main() -> anyhow::Result<()> {
     // 托盘线程通过 running 标志退出
     match tray_handle.join() {
         Ok(()) => {}
-        Err(_) => eprintln!("托盘线程 join 失败"),
+        Err(_) => crate::dbg_output("托盘线程 join 失败"),
     }
     // 通知 GUI 线程退出事件循环
     let _ = gui_update_tx.send(GuiUpdate::Quit);
@@ -344,7 +352,7 @@ fn run_vad_loop(
         Ok(rate) => rate,
         Err(e) => {
             let msg = format!("音频采集启动失败: {}", e);
-            eprintln!("{}", msg);
+            crate::dbg_output(&msg);
             let _ = crash_tx.send(msg);
             return;
         }
@@ -363,6 +371,8 @@ fn run_vad_loop(
     let mut spectral_flatness_threshold = params.spectral_flatness_threshold;
     let mut noise_floor_multiplier = params.noise_floor_multiplier;
     let mut fft_planner = FftPlanner::new();
+    let mut sf_state = SpectralFlatnessState::new();
+    let mut frame_i16 = vec![0i16; 256];
     let mut enabled = true;
 
     while running.load(Ordering::Relaxed) {
@@ -411,15 +421,17 @@ fn run_vad_loop(
             }
 
             // Compute spectral flatness pre-filter
-            let sf = spectral_flatness(&frame, &mut fft_planner);
+            let sf = sf_state.compute(&frame, &mut fft_planner);
 
             // earshot 需要精确 256 个 i16 采样
-            let frame_i16: Vec<i16> = frame
-                .iter()
-                .map(|&s| (s * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32) as i16)
-                .collect();
+            for (i, &s) in frame.iter().enumerate() {
+                if i < frame_i16.len() {
+                    frame_i16[i] = (s * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                }
+            }
+            let frame_i16_len = frame.len().min(256);
 
-            if frame_i16.len() == 256 {
+            if frame_i16_len == 256 {
                 let score = if sf > spectral_flatness_threshold {
                     // Flat noise: skip earshot, treat as silence
                     0.0

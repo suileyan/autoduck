@@ -301,7 +301,7 @@ pub fn run_tray(
                 TrayUpdate::EnabledChanged(enabled) => app.update_enabled(enabled),
                 TrayUpdate::HotkeyChanged(hotkey) => {
                     if let Err(e) = app.register_hotkey(&hotkey) {
-                        eprintln!("注册快捷键失败: {}", e);
+                        crate::dbg_output(&format!("注册快捷键失败: {}", e));
                     }
                 }
                 TrayUpdate::SuspendHotkey(hotkey_str) => {
@@ -314,7 +314,7 @@ pub fn run_tray(
                 }
                 TrayUpdate::RestoreHotkey(hotkey) => {
                     if let Err(e) = app.register_hotkey(&hotkey) {
-                        eprintln!("恢复快捷键注册失败: {}", e);
+                        crate::dbg_output(&format!("恢复快捷键注册失败: {}", e));
                     }
                 }
             }
@@ -325,9 +325,9 @@ pub fn run_tray(
             if let (Some(ref hotkey_str), Some(suspended_at)) = (&app.suspended_hotkey_str, app.suspended_at) {
                 if suspended_at.elapsed() > Duration::from_secs(5) {
                     let hotkey = hotkey_str.clone();
-                    eprintln!("[tray] SuspendHotkey 超时，自动恢复快捷键: {}", hotkey);
+                    crate::dbg_output(&format!("[tray] SuspendHotkey 超时，自动恢复快捷键: {}", hotkey));
                     if let Err(e) = app.register_hotkey(&hotkey) {
-                        eprintln!("[tray] 自动恢复快捷键失败: {}", e);
+                        crate::dbg_output(&format!("[tray] 自动恢复快捷键失败: {}", e));
                     }
                 }
             }

@@ -63,23 +63,50 @@ impl VolumeWorker {
     fn run_inner(&mut self) {
         loop {
             match self.receiver.recv_timeout(std::time::Duration::from_millis(2000)) {
-                Ok(VolumeCommand::Duck) => {
-                    self.controller.duck(self.duck_ratio);
+                Ok(cmd) => {
+                    if !self.handle_command(cmd) {
+                        break;
+                    }
                 }
-                Ok(VolumeCommand::Restore { ack }) => {
-                    self.controller.restore();
+                Err(RecvTimeoutError::Timeout) => {
+                    // Periodic session refresh (meaningful for Mode B, no-op for Mode A)
+                    self.controller.refresh_sessions();
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    // Channel disconnected, exit gracefully
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Handle a command. Returns `false` if the worker should stop.
+    fn handle_command(&mut self, mut cmd: VolumeCommand) -> bool {
+        loop {
+            match cmd {
+                VolumeCommand::Duck => {
+                    if let Some(interrupted_cmd) = self.controller.duck(self.duck_ratio, Some(&self.receiver)) {
+                        cmd = interrupted_cmd;
+                        continue;
+                    }
+                    return true;
+                }
+                VolumeCommand::Restore { ack } => {
+                    if let Some(interrupted_cmd) = self.controller.restore(Some(&self.receiver)) {
+                        cmd = interrupted_cmd;
+                        continue;
+                    }
                     if let Some(ack) = ack {
                         let _ = ack.send(());
                     }
+                    return true;
                 }
-                Ok(VolumeCommand::Stop) => {
-                    // 退出前恢复音量，防止应用退出后音量仍处于降音状态
-                    self.controller.restore();
-                    break;
+                VolumeCommand::Stop => {
+                    self.controller.restore(None);
+                    return false;
                 }
-                Ok(VolumeCommand::UpdateConfig(config)) => {
-                    // Restore volume before replacing controller to avoid losing snapshots
-                    self.controller.restore();
+                VolumeCommand::UpdateConfig(config) => {
+                    self.controller.restore(None);
                     match VolumeController::new(
                         config.duck_mode,
                         config.excluded_apps.clone(),
@@ -91,17 +118,10 @@ impl VolumeWorker {
                             self.duck_ratio = config.duck_ratio;
                         }
                         Err(e) => {
-                            eprintln!("更新配置时创建 VolumeController 失败: {}", e);
+                            crate::dbg_output(&format!("更新配置时创建 VolumeController 失败: {}", e));
                         }
                     }
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    // Periodic session refresh (meaningful for Mode B, no-op for Mode A)
-                    self.controller.refresh_sessions();
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    // Channel disconnected, exit gracefully
-                    break;
+                    return true;
                 }
             }
         }

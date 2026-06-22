@@ -1,3 +1,4 @@
+use crate::audio_capture::VAD_FRAME_DURATION_MS;
 use crate::config::{validate_process_name, AppConfig, DuckMode};
 use crate::hotkey::{format_hotkey, vk_to_code};
 use anyhow::Result;
@@ -6,6 +7,7 @@ use raw_window_handle::HasWindowHandle;
 use slint::Model;
 use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 use std::sync::atomic::AtomicPtr;
+use std::sync::Arc;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -41,6 +43,25 @@ pub enum GuiUpdate {
     Quit,
 }
 
+/// 从 AppConfig 设置窗口属性
+fn apply_config_to_window(win: &SettingsWindow, config: &AppConfig) {
+    win.set_duck_mode(match config.duck_mode {
+        DuckMode::Global => "global".into(),
+        DuckMode::Apps => "apps".into(),
+    });
+    win.set_duck_ratio(config.duck_ratio);
+    win.set_vad_threshold(config.vad_threshold);
+    win.set_attack_frames(config.attack_frames as i32);
+    win.set_release_frames(config.release_frames as i32);
+    win.set_attack_ms((config.attack_frames * VAD_FRAME_DURATION_MS).to_string().into());
+    win.set_release_ms((config.release_frames * VAD_FRAME_DURATION_MS).to_string().into());
+    win.set_duck_duration_ms(config.duck_duration_ms as i32);
+    win.set_restore_duration_ms(config.restore_duration_ms as i32);
+    win.set_spectral_flatness_threshold(config.spectral_flatness_threshold);
+    win.set_noise_floor_multiplier(config.noise_floor_multiplier);
+    win.set_hotkey(config.hotkey.clone().into());
+}
+
 pub struct GuiApp {
     window: SettingsWindow,
     _timer: slint::Timer,
@@ -55,21 +76,7 @@ impl GuiApp {
         let window = SettingsWindow::new()?;
 
         // Set initial values from config
-        window.set_duck_mode(match config.duck_mode {
-            DuckMode::Global => "global".into(),
-            DuckMode::Apps => "apps".into(),
-        });
-        window.set_duck_ratio(config.duck_ratio);
-        window.set_vad_threshold(config.vad_threshold);
-        window.set_attack_frames(config.attack_frames as i32);
-        window.set_release_frames(config.release_frames as i32);
-        window.set_attack_ms((config.attack_frames * 16).to_string().into());
-        window.set_release_ms((config.release_frames * 16).to_string().into());
-        window.set_duck_duration_ms(config.duck_duration_ms as i32);
-        window.set_restore_duration_ms(config.restore_duration_ms as i32);
-        window.set_spectral_flatness_threshold(config.spectral_flatness_threshold);
-        window.set_noise_floor_multiplier(config.noise_floor_multiplier);
-        window.set_hotkey(config.hotkey.clone().into());
+        apply_config_to_window(&window, config);
 
         // Set initial excluded apps
         let app_entries: Vec<AppEntry> = config
@@ -87,42 +94,30 @@ impl GuiApp {
         let win_apply = window.as_weak();
         let sender_apply = sender.clone();
         window.on_apply_settings(move || {
-            let win = win_apply.upgrade().unwrap();
-            let config = AppConfig::from_window(&win);
-            let _ = sender_apply.send(GuiMessage::ConfigChanged(config));
-            win.set_status_text("设置已应用".into());
+            if let Some(win) = win_apply.upgrade() {
+                let config = AppConfig::from_window(&win);
+                let _ = sender_apply.send(GuiMessage::ConfigChanged(config));
+                win.set_status_text("设置已应用".into());
+            }
         });
 
         // --- Callback: Reset Settings ---
         let win_reset = window.as_weak();
         window.on_reset_settings(move || {
-            let default = AppConfig::default();
-            let win = win_reset.upgrade().unwrap();
-            win.set_duck_mode(match default.duck_mode {
-                DuckMode::Global => "global".into(),
-                DuckMode::Apps => "apps".into(),
-            });
-            win.set_duck_ratio(default.duck_ratio);
-            win.set_vad_threshold(default.vad_threshold);
-            win.set_attack_frames(default.attack_frames as i32);
-            win.set_release_frames(default.release_frames as i32);
-            win.set_attack_ms((default.attack_frames * 16).to_string().into());
-            win.set_release_ms((default.release_frames * 16).to_string().into());
-            win.set_duck_duration_ms(default.duck_duration_ms as i32);
-            win.set_restore_duration_ms(default.restore_duration_ms as i32);
-            win.set_spectral_flatness_threshold(default.spectral_flatness_threshold);
-            win.set_noise_floor_multiplier(default.noise_floor_multiplier);
-            win.set_hotkey(default.hotkey.clone().into());
-            let entries: Vec<AppEntry> = default
-                .excluded_apps
-                .iter()
-                .map(|name| AppEntry {
-                    name: name.into(),
-                    excluded: true,
-                })
-                .collect();
-            win.set_app_list(std::rc::Rc::new(slint::VecModel::from(entries)).into());
-            win.set_status_text("已重置为默认值".into());
+            if let Some(win) = win_reset.upgrade() {
+                let default = AppConfig::default();
+                apply_config_to_window(&win, &default);
+                let entries: Vec<AppEntry> = default
+                    .excluded_apps
+                    .iter()
+                    .map(|name| AppEntry {
+                        name: name.into(),
+                        excluded: true,
+                    })
+                    .collect();
+                win.set_app_list(std::rc::Rc::new(slint::VecModel::from(entries)).into());
+                win.set_status_text("已重置为默认值".into());
+            }
         });
 
         // --- Callback: Add Excluded App ---
@@ -130,58 +125,61 @@ impl GuiApp {
         window.on_add_excluded_app(move |name: slint::SharedString| {
             let name_str = name.to_string();
             if !validate_process_name(&name_str) {
-                let win = win_add.upgrade().unwrap();
-                win.set_status_text("无效的进程名".into());
+                if let Some(win) = win_add.upgrade() {
+                    win.set_status_text("无效的进程名".into());
+                }
                 return;
             }
             let name_str = name_str.to_string();
-            let win = win_add.upgrade().unwrap();
-            let model = win.get_app_list();
-            let vec_model = model.as_any()
-                .downcast_ref::<slint::VecModel<AppEntry>>()
-                .unwrap();
+            if let Some(win) = win_add.upgrade() {
+                let model = win.get_app_list();
+                let vec_model = model.as_any()
+                    .downcast_ref::<slint::VecModel<AppEntry>>()
+                    .unwrap();
 
-            // Check if already in the list (case-insensitive)
-            for i in 0..vec_model.row_count() {
-                if vec_model.row_data(i).map(|e| e.name.to_string().eq_ignore_ascii_case(&name_str)).unwrap_or(false) {
-                    // Already exists, just mark as excluded
-                    if let Some(mut entry) = vec_model.row_data(i) {
-                        entry.excluded = true;
-                        vec_model.set_row_data(i, entry);
+                // Check if already in the list (case-insensitive)
+                for i in 0..vec_model.row_count() {
+                    if vec_model.row_data(i).map(|e| e.name.to_string().eq_ignore_ascii_case(&name_str)).unwrap_or(false) {
+                        // Already exists, just mark as excluded
+                        if let Some(mut entry) = vec_model.row_data(i) {
+                            entry.excluded = true;
+                            vec_model.set_row_data(i, entry);
+                        }
+                        win.set_status_text("".into());
+                        return;
                     }
-                    win.set_status_text("".into());
-                    return;
                 }
-            }
 
-            // Not in list, add new entry
-            vec_model.push(AppEntry {
-                name: name_str.into(),
-                excluded: true,
-            });
-            win.set_status_text("".into());
+                // Not in list, add new entry
+                vec_model.push(AppEntry {
+                    name: name_str.into(),
+                    excluded: true,
+                });
+                win.set_status_text("".into());
+            }
         });
 
         // --- Callback: Remove Excluded App ---
         let win_remove = window.as_weak();
         window.on_remove_excluded_app(move |name: slint::SharedString| {
             let name_str = name.to_string();
-            let win = win_remove.upgrade().unwrap();
-            let model = win.get_app_list();
-            let vec_model = model.as_any()
-                .downcast_ref::<slint::VecModel<AppEntry>>()
-                .unwrap();
+            if let Some(win) = win_remove.upgrade() {
+                let model = win.get_app_list();
+                let vec_model = model.as_any()
+                    .downcast_ref::<slint::VecModel<AppEntry>>()
+                    .unwrap();
 
-            for i in 0..vec_model.row_count() {
-                if vec_model.row_data(i).map(|e| e.name.to_string().eq_ignore_ascii_case(&name_str)).unwrap_or(false) {
-                    if let Some(mut entry) = vec_model.row_data(i) {
-                        entry.excluded = false;
-                        vec_model.set_row_data(i, entry);
+                for i in 0..vec_model.row_count() {
+                    if vec_model.row_data(i).map(|e| e.name.to_string().eq_ignore_ascii_case(&name_str)).unwrap_or(false) {
+                        if let Some(mut entry) = vec_model.row_data(i) {
+                            entry.excluded = false;
+                            vec_model.set_row_data(i, entry);
+                        }
+                        break;
                     }
-                    break;
                 }
+                win.set_status_text("".into());
             }
-            win.set_status_text("".into());
         });
 
         // --- Callback: Refresh Apps ---
@@ -194,7 +192,7 @@ impl GuiApp {
         let win_attack = window.as_weak();
         window.on_attack_ms_changed(move |val: slint::SharedString| {
             if let Ok(ms) = val.parse::<u32>() {
-                let frames = (ms / 16).max(1);
+                let frames = (ms / VAD_FRAME_DURATION_MS).max(1);
                 if let Some(win) = win_attack.upgrade() {
                     win.set_attack_frames(frames as i32);
                 }
@@ -205,7 +203,7 @@ impl GuiApp {
         let win_release = window.as_weak();
         window.on_release_ms_changed(move |val: slint::SharedString| {
             if let Ok(ms) = val.parse::<u32>() {
-                let frames = (ms / 16).max(1);
+                let frames = (ms / VAD_FRAME_DURATION_MS).max(1);
                 if let Some(win) = win_release.upgrade() {
                     win.set_release_frames(frames as i32);
                 }
@@ -391,21 +389,7 @@ impl GuiApp {
                         win.set_app_list(std::rc::Rc::new(slint::VecModel::from(entries)).into());
                     }
                     GuiUpdate::ConfigReset(config) => {
-                        win.set_duck_mode(match config.duck_mode {
-                            DuckMode::Global => "global".into(),
-                            DuckMode::Apps => "apps".into(),
-                        });
-                        win.set_duck_ratio(config.duck_ratio);
-                        win.set_vad_threshold(config.vad_threshold);
-                        win.set_attack_frames(config.attack_frames as i32);
-                        win.set_release_frames(config.release_frames as i32);
-                        win.set_attack_ms((config.attack_frames * 16).to_string().into());
-                        win.set_release_ms((config.release_frames * 16).to_string().into());
-                        win.set_duck_duration_ms(config.duck_duration_ms as i32);
-                        win.set_restore_duration_ms(config.restore_duration_ms as i32);
-                        win.set_spectral_flatness_threshold(config.spectral_flatness_threshold);
-                        win.set_noise_floor_multiplier(config.noise_floor_multiplier);
-                        win.set_hotkey(config.hotkey.clone().into());
+                        apply_config_to_window(&win, &config);
                     }
                     GuiUpdate::ShowSettings => {
                         // Show the window using Win32 ShowWindow(SW_SHOW)
@@ -540,7 +524,7 @@ fn run_keyboard_hook(tx: Sender<CaptureResult>) {
         dbg_output(&format!("[hotkey-capture] 钩子线程 ID: {}", thread_id));
 
         // 保存 sender 到全局，供钩子回调使用
-        HOOK_SENDER_PTR.store(Box::into_raw(Box::new(tx)), AtomicOrdering::SeqCst);
+        HOOK_SENDER_PTR.store(Arc::into_raw(Arc::new(tx)) as *mut _, AtomicOrdering::SeqCst);
 
         // 运行 Win32 消息循环——这是 WH_KEYBOARD_LL 钩子正常工作的必要条件
         dbg_output("[hotkey-capture] 进入消息循环，等待按键...");
@@ -568,7 +552,7 @@ fn run_keyboard_hook(tx: Sender<CaptureResult>) {
         // 释放 sender
         let sender_ptr = HOOK_SENDER_PTR.swap(std::ptr::null_mut(), AtomicOrdering::SeqCst);
         if !sender_ptr.is_null() {
-            let _ = Box::from_raw(sender_ptr);
+            let _ = Arc::from_raw(sender_ptr as *const _);
         }
     }
 }
@@ -588,8 +572,11 @@ fn stop_keyboard_hook() {
             );
         }
     }
-    // 不清理 HOOK_SENDER_PTR——钩子线程正常退出时会自行清理
-    // 若钩子线程异常终止，sender 泄漏可接受（进程退出时回收）
+    // 清理 HOOK_SENDER_PTR，防止钩子线程异常终止时内存泄漏
+    let sender_ptr = HOOK_SENDER_PTR.swap(std::ptr::null_mut(), AtomicOrdering::SeqCst);
+    if !sender_ptr.is_null() {
+        let _ = unsafe { Arc::from_raw(sender_ptr as *const _) };
+    }
 }
 
 /// WH_KEYBOARD_LL 钩子回调
@@ -650,25 +637,22 @@ unsafe extern "system" fn keyboard_hook_proc(
     CallNextHookEx(None, n_code, w_param, l_param)
 }
 
-fn get_hook_sender() -> Option<&'static Sender<CaptureResult>> {
+fn get_hook_sender() -> Option<Arc<Sender<CaptureResult>>> {
     let ptr = HOOK_SENDER_PTR.load(AtomicOrdering::SeqCst);
     if ptr.is_null() {
         None
     } else {
-        Some(unsafe { &*ptr })
+        // SAFETY: ptr was created by Arc::into_raw and is still valid
+        let arc: Arc<Sender<CaptureResult>> = unsafe { Arc::from_raw(ptr) };
+        // Put the raw pointer back so it remains valid for other callers
+        let _ = Arc::into_raw(arc.clone());
+        Some(arc)
     }
 }
 
-/// 安全的调试输出，使用 OutputDebugStringW
-/// 适用于钩子回调中（不能使用 eprintln! 因为会获取互斥锁导致超时）
-/// 也用于替代 eprintln! 避免生产版本中持续输出到 stderr
+/// 安全的调试输出，委托到 main.rs 中的共享实现
 fn dbg_output(s: &str) {
-    use windows::core::PCWSTR;
-    use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
-    let wide: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
-    unsafe {
-        OutputDebugStringW(PCWSTR(wide.as_ptr()));
-    }
+    crate::dbg_output(s)
 }
 
 fn is_modifier_key(vk: u16) -> bool {

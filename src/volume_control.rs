@@ -4,6 +4,8 @@ use std::thread;
 use std::time::Duration;
 
 use crate::config::DuckMode;
+use crate::volume_worker::VolumeCommand;
+use crossbeam_channel::Receiver;
 use windows::core::GUID;
 use windows::core::Interface;
 use windows::Win32::Media::Audio::{
@@ -85,17 +87,17 @@ impl VolumeController {
         }
     }
 
-    pub fn duck(&mut self, ratio: f32) {
+    pub fn duck(&mut self, ratio: f32, cmd_rx: Option<&Receiver<VolumeCommand>>) -> Option<VolumeCommand> {
         match self {
-            VolumeController::Global(ctrl) => ctrl.duck(ratio),
-            VolumeController::Apps(ctrl) => ctrl.duck(ratio),
+            VolumeController::Global(ctrl) => ctrl.duck(ratio, cmd_rx),
+            VolumeController::Apps(ctrl) => ctrl.duck(ratio, cmd_rx),
         }
     }
 
-    pub fn restore(&mut self) {
+    pub fn restore(&mut self, cmd_rx: Option<&Receiver<VolumeCommand>>) -> Option<VolumeCommand> {
         match self {
-            VolumeController::Global(ctrl) => ctrl.restore(),
-            VolumeController::Apps(ctrl) => ctrl.restore(),
+            VolumeController::Global(ctrl) => ctrl.restore(cmd_rx),
+            VolumeController::Apps(ctrl) => ctrl.restore(cmd_rx),
         }
     }
 
@@ -153,24 +155,26 @@ impl GlobalVolumeController {
         })
     }
 
-    pub fn duck(&mut self, ratio: f32) {
+    pub fn duck(&mut self, ratio: f32, cmd_rx: Option<&Receiver<VolumeCommand>>) -> Option<VolumeCommand> {
         if self.volume_snapshot.is_some() {
             // Already ducked — skip to prevent further lowering
-            return;
+            return None;
         }
         let current = self.get_current_volume();
         self.volume_snapshot = Some(current);
         let target = current * ratio;
         let steps = 10u32;
         let step_delay_ms = self.duck_duration_ms / steps;
-        self.set_volume_gradual(target, steps, step_delay_ms as u64);
+        self.set_volume_gradual(target, steps, step_delay_ms as u64, cmd_rx)
     }
 
-    pub fn restore(&mut self) {
+    pub fn restore(&mut self, cmd_rx: Option<&Receiver<VolumeCommand>>) -> Option<VolumeCommand> {
         if let Some(snapshot) = self.volume_snapshot.take() {
             let steps = 10u32;
             let step_delay_ms = self.restore_duration_ms / steps;
-            self.set_volume_gradual(snapshot, steps, step_delay_ms as u64);
+            self.set_volume_gradual(snapshot, steps, step_delay_ms as u64, cmd_rx)
+        } else {
+            None
         }
     }
 
@@ -182,7 +186,7 @@ impl GlobalVolumeController {
         }
     }
 
-    fn set_volume_gradual(&self, target: f32, steps: u32, step_delay_ms: u64) {
+    fn set_volume_gradual(&self, target: f32, steps: u32, step_delay_ms: u64, cmd_rx: Option<&Receiver<VolumeCommand>>) -> Option<VolumeCommand> {
         let current = self.get_current_volume();
         let step_delta = (target - current) / steps as f32;
         for i in 1..=steps {
@@ -194,9 +198,15 @@ impl GlobalVolumeController {
                     .SetMasterVolumeLevelScalar(clamped, &OUR_EVENT_CONTEXT as *const _);
             }
             if i < steps {
+                if let Some(rx) = cmd_rx {
+                    if let Ok(cmd) = rx.try_recv() {
+                        return Some(cmd);
+                    }
+                }
                 thread::sleep(Duration::from_millis(step_delay_ms));
             }
         }
+        None
     }
 }
 
@@ -251,11 +261,13 @@ impl AppsVolumeController {
         })
     }
 
-    pub fn duck(&mut self, ratio: f32) {
+    pub fn duck(&mut self, ratio: f32, cmd_rx: Option<&Receiver<VolumeCommand>>) -> Option<VolumeCommand> {
         self.duck_ratio = ratio;
         let steps = 10u32;
         let step_delay_ms = self.duck_duration_ms / steps;
         let sessions = self.enumerate_sessions();
+        let mut interrupted_cmd = None;
+
         for session in sessions {
             if let Some(simple_vol) = self.get_session_volume(&session) {
                 if let Some(pid) = self.get_session_pid(&session) {
@@ -277,14 +289,27 @@ impl AppsVolumeController {
                             unsafe { simple_vol.GetMasterVolume().unwrap_or(1.0) };
                         self.volume_snapshots.insert(pid, current);
                         let target = current * ratio;
-                        set_volume_gradual_session(&simple_vol, target, steps, step_delay_ms as u64);
+
+                        if interrupted_cmd.is_some() {
+                            // Already interrupted - set target immediately for remaining sessions
+                            unsafe {
+                                let _ = simple_vol.SetMasterVolume(target.clamp(0.0, 1.0), &OUR_EVENT_CONTEXT as *const _);
+                            }
+                        } else if let Some(cmd) = set_volume_gradual_session(&simple_vol, target, steps, step_delay_ms as u64, cmd_rx) {
+                            // Interrupted during gradual change - set target for this session immediately
+                            unsafe {
+                                let _ = simple_vol.SetMasterVolume(target.clamp(0.0, 1.0), &OUR_EVENT_CONTEXT as *const _);
+                            }
+                            interrupted_cmd = Some(cmd);
+                        }
                     }
                 }
             }
         }
+        interrupted_cmd
     }
 
-    pub fn restore(&mut self) {
+    pub fn restore(&mut self, cmd_rx: Option<&Receiver<VolumeCommand>>) -> Option<VolumeCommand> {
         let steps = 10u32;
         let step_delay_ms = self.restore_duration_ms / steps;
         let sessions = self.enumerate_sessions();
@@ -292,12 +317,20 @@ impl AppsVolumeController {
             if let Some(simple_vol) = self.get_session_volume(&session) {
                 if let Some(pid) = self.get_session_pid(&session) {
                     if let Some(&original) = self.volume_snapshots.get(&pid) {
-                        set_volume_gradual_session(&simple_vol, original, steps, step_delay_ms as u64);
+                        if let Some(cmd) = set_volume_gradual_session(&simple_vol, original, steps, step_delay_ms as u64, cmd_rx) {
+                            // Interrupted - only remove this session's snapshot
+                            self.volume_snapshots.remove(&pid);
+                            return Some(cmd);
+                        }
+                        // Successfully restored this session
+                        self.volume_snapshots.remove(&pid);
                     }
                 }
             }
         }
+        // All snapshots restored and removed individually above; clear just in case
         self.volume_snapshots.clear();
+        None
     }
 
     pub fn refresh_sessions(&mut self) {
@@ -332,7 +365,7 @@ impl AppsVolumeController {
                         let target = current * self.duck_ratio;
                         let steps = 10u32;
                         let step_delay_ms = self.duck_duration_ms / steps;
-                        set_volume_gradual_session(&simple_vol, target, steps, step_delay_ms as u64);
+                        set_volume_gradual_session(&simple_vol, target, steps, step_delay_ms as u64, None);
                     }
                 }
             }
@@ -379,12 +412,14 @@ impl AppsVolumeController {
 }
 
 /// Gradually change volume for a single audio session.
+/// Returns `Some(cmd)` if interrupted by a new command, `None` if completed normally.
 fn set_volume_gradual_session(
     volume: &ISimpleAudioVolume,
     target: f32,
     steps: u32,
     step_delay_ms: u64,
-) {
+    cmd_rx: Option<&Receiver<VolumeCommand>>,
+) -> Option<VolumeCommand> {
     let current = unsafe { volume.GetMasterVolume().unwrap_or(1.0) };
     let step_delta = (target - current) / steps as f32;
     for i in 1..=steps {
@@ -394,9 +429,15 @@ fn set_volume_gradual_session(
             let _ = volume.SetMasterVolume(clamped, &OUR_EVENT_CONTEXT as *const _);
         }
         if i < steps {
+            if let Some(rx) = cmd_rx {
+                if let Ok(cmd) = rx.try_recv() {
+                    return Some(cmd);
+                }
+            }
             thread::sleep(Duration::from_millis(step_delay_ms));
         }
     }
+    None
 }
 
 /// Enumerate current audio session process names.

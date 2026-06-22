@@ -84,7 +84,8 @@ impl AppConfig {
     pub fn load(path: &Path) -> Result<Self> {
         if path.exists() {
             let content = fs::read_to_string(path)?;
-            let config: AppConfig = toml::from_str(&content)?;
+            let mut config: AppConfig = toml::from_str(&content)?;
+            config.validate();
             Ok(config)
         } else {
             let config = AppConfig::default();
@@ -94,6 +95,29 @@ impl AppConfig {
             let toml_str = toml::to_string_pretty(&config)?;
             fs::write(path, toml_str)?;
             Ok(config)
+        }
+    }
+
+    /// 验证并修正配置字段值，非法值使用默认值替代
+    fn validate(&mut self) {
+        let defaults = AppConfig::default();
+        if self.duck_ratio <= 0.0 || self.duck_ratio > 1.0 {
+            self.duck_ratio = defaults.duck_ratio;
+        }
+        if self.vad_threshold < 0.0 || self.vad_threshold > 1.0 {
+            self.vad_threshold = defaults.vad_threshold;
+        }
+        if self.attack_frames == 0 {
+            self.attack_frames = defaults.attack_frames;
+        }
+        if self.release_frames == 0 {
+            self.release_frames = defaults.release_frames;
+        }
+        if self.spectral_flatness_threshold < 0.0 || self.spectral_flatness_threshold > 1.0 {
+            self.spectral_flatness_threshold = defaults.spectral_flatness_threshold;
+        }
+        if self.noise_floor_multiplier <= 0.0 {
+            self.noise_floor_multiplier = defaults.noise_floor_multiplier;
         }
     }
 
@@ -111,7 +135,15 @@ impl AppConfig {
                     {
                         let old_config = exe_dir.join("config.toml");
                         if old_config.exists() && std::fs::copy(&old_config, &new_config).is_ok() {
-                            let _ = std::fs::remove_file(&old_config);
+                            // 验证新文件可正确解析后才删除旧文件
+                            if let Ok(content) = std::fs::read_to_string(&new_config) {
+                                if toml::from_str::<AppConfig>(&content).is_ok() {
+                                    let _ = std::fs::remove_file(&old_config);
+                                } else {
+                                    // 新文件损坏，保留旧文件
+                                    let _ = std::fs::remove_file(&new_config);
+                                }
+                            }
                         }
                     }
                 }
