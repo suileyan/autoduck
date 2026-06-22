@@ -298,6 +298,12 @@ fn main() -> anyhow::Result<()> {
                     }
                     let _ = tray_update_tx.send(TrayUpdate::HotkeyChanged(config.hotkey.clone()));
                 }
+                GuiMessage::SuspendHotkey(hotkey) => {
+                    let _ = tray_update_tx.send(TrayUpdate::SuspendHotkey(hotkey));
+                }
+                GuiMessage::RestoreHotkey(hotkey) => {
+                    let _ = tray_update_tx.send(TrayUpdate::RestoreHotkey(hotkey));
+                }
             }
         }
 

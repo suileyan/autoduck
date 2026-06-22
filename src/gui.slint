@@ -39,7 +39,11 @@ export component SettingsWindow inherits Window {
     in-out property <string> new-app-name: "";
     in-out property <string> status-text: "";
     in-out property <string> hotkey: "Ctrl+Shift+D";
-    callback hotkey-changed(string);
+    in-out property <bool> hotkey-capturing: false;
+    in-out property <string> hotkey-before-capture: "";
+    callback capture-hotkey();
+    callback apply-hotkey();
+    callback reset-hotkey();
 
     VerticalBox {
         padding: 16px;
@@ -115,18 +119,59 @@ export component SettingsWindow inherits Window {
                         spacing: 8px;
 
                         HorizontalBox {
-                            Text { text: "切换快捷键:"; vertical-stretch: 0; min-width: 100px; }
-                            LineEdit {
-                                text: hotkey;
-                                edited(val) => {
-                                    hotkey = val;
-                                    hotkey-changed(val);
+                            Text { text: "切换快捷键:"; vertical-stretch: 0; min-width: 100px; vertical-alignment: center; }
+                            Rectangle {
+                                width: 200px;
+                                height: 32px;
+                                border-width: 1px;
+                                border-color: hotkey-capturing ? #4a9eda : #cccccc;
+                                border-radius: 4px;
+                                background: hotkey-capturing ? #f0f7ff : #ffffff;
+
+                                Text {
+                                    text: hotkey-capturing ? "请按下快捷键..." : (hotkey == "" ? "未设置" : hotkey);
+                                    color: hotkey-capturing ? #4a9eda : (hotkey == "" ? #999999 : #333333);
+                                    vertical-alignment: center;
+                                    horizontal-alignment: center;
+                                    x: 8px;
+                                    width: parent.width - 16px;
+                                }
+
+                                TouchArea {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    clicked => {
+                                        if hotkey-capturing {
+                                            hotkey = hotkey-before-capture;
+                                            hotkey-capturing = false;
+                                        } else {
+                                            hotkey-before-capture = hotkey;
+                                            hotkey-capturing = true;
+                                            hotkey = "";
+                                            capture-hotkey();
+                                        }
+                                    }
                                 }
                             }
-                            Text { text: "（如 Ctrl+Shift+D）"; vertical-stretch: 0; vertical-alignment: center; color: #888888; }
+                            Button {
+                                text: "默认";
+                                clicked => {
+                                    hotkey = "Ctrl+Shift+D";
+                                    hotkey-capturing = false;
+                                    reset-hotkey();
+                                    apply-hotkey();
+                                }
+                            }
+                            Button {
+                                text: "应用";
+                                clicked => {
+                                    hotkey-capturing = false;
+                                    apply-hotkey();
+                                }
+                            }
                         }
                         Text {
-                            text: "按下快捷键可快速开启或关闭降音功能，留空则禁用快捷键";
+                            text: "点击输入框后按下按键组合设置快捷键，按 Esc 取消；点击窗口取消设置";
                             font-size: 11px;
                             color: #888888;
                             wrap: word-wrap;

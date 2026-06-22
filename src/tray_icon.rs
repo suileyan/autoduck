@@ -3,8 +3,8 @@ use crate::hotkey::parse_hotkey;
 use anyhow::Result;
 use crossbeam_channel::Sender;
 use global_hotkey::{
-    hotkey::{Code, HotKey},
-    GlobalHotKeyManager, GlobalHotKeyEvent,
+    hotkey::HotKey,
+    GlobalHotKeyManager, GlobalHotKeyEvent, HotKeyState,
 };
 use muda::{
     CheckMenuItemBuilder, Menu, MenuId, MenuItemBuilder, PredefinedMenuItem, Submenu,
@@ -39,6 +39,9 @@ pub enum TrayUpdate {
     Crashed,
     EnabledChanged(bool),
     HotkeyChanged(String),
+    /// 暂停快捷键注册，携带当前快捷键字符串以便恢复
+    SuspendHotkey(String),
+    RestoreHotkey(String),
 }
 
 pub struct TrayApp {
@@ -51,7 +54,11 @@ pub struct TrayApp {
     crashed: bool,
     update_rx: crossbeam_channel::Receiver<TrayUpdate>,
     hotkey_manager: GlobalHotKeyManager,
-    current_hotkey_id: Option<u32>,
+    current_hotkey: Option<HotKey>,
+    /// 保存当前快捷键字符串，SuspendHotkey 时备份，RestoreHotkey 消息丢失时可恢复
+    suspended_hotkey_str: Option<String>,
+    /// SuspendHotkey 的时间戳，用于超时自动恢复
+    suspended_at: Option<std::time::Instant>,
 }
 
 impl TrayApp {
@@ -90,7 +97,9 @@ impl TrayApp {
             crashed: false,
             update_rx,
             hotkey_manager,
-            current_hotkey_id: None,
+            current_hotkey: None,
+            suspended_hotkey_str: None,
+            suspended_at: None,
         };
 
         // 注册初始快捷键
@@ -101,11 +110,7 @@ impl TrayApp {
 
     fn register_hotkey(&mut self, hotkey_str: &str) -> Result<()> {
         // 先注销旧快捷键
-        if let Some(_id) = self.current_hotkey_id.take() {
-            let old = HotKey::new(None, Code::KeyA);
-            // HotKey 的 id 是自动生成的，需要通过 id 来注销
-            // unregister 接受 HotKey，但实际匹配的是 id
-            // 由于 API 限制，我们直接用 manager 的方式
+        if let Some(old) = self.current_hotkey.take() {
             let _ = self.hotkey_manager.unregister(old);
         }
 
@@ -116,8 +121,12 @@ impl TrayApp {
         if let Some((modifiers, code)) = parse_hotkey(hotkey_str) {
             let hotkey = HotKey::new(Some(modifiers), code);
             self.hotkey_manager.register(hotkey)?;
-            self.current_hotkey_id = Some(hotkey.id());
+            self.current_hotkey = Some(hotkey);
         }
+
+        // 注册成功后清除挂起备份
+        self.suspended_hotkey_str = None;
+        self.suspended_at = None;
 
         Ok(())
     }
@@ -276,11 +285,13 @@ pub fn run_tray(
         }
 
         // Check for global hotkey events
-        if let Ok(_event) = GlobalHotKeyEvent::receiver().try_recv() {
-            // 快捷键触发时切换启用/禁用状态
-            let new_enabled = !app.enabled;
-            app.enabled = new_enabled;
-            let _ = app.event_sender.send(TrayEvent::ToggleEnabled(new_enabled));
+        if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+            if event.state == HotKeyState::Pressed {
+                // 快捷键触发时切换启用/禁用状态
+                let new_enabled = !app.enabled;
+                app.enabled = new_enabled;
+                let _ = app.event_sender.send(TrayEvent::ToggleEnabled(new_enabled));
+            }
         }
 
         // Check for tray updates from main loop
@@ -291,6 +302,32 @@ pub fn run_tray(
                 TrayUpdate::HotkeyChanged(hotkey) => {
                     if let Err(e) = app.register_hotkey(&hotkey) {
                         eprintln!("注册快捷键失败: {}", e);
+                    }
+                }
+                TrayUpdate::SuspendHotkey(hotkey_str) => {
+                    // 保存快捷键字符串，防止 RestoreHotkey 消息丢失后无法恢复
+                    app.suspended_hotkey_str = Some(hotkey_str);
+                    app.suspended_at = Some(std::time::Instant::now());
+                    if let Some(old) = app.current_hotkey.take() {
+                        let _ = app.hotkey_manager.unregister(old);
+                    }
+                }
+                TrayUpdate::RestoreHotkey(hotkey) => {
+                    if let Err(e) = app.register_hotkey(&hotkey) {
+                        eprintln!("恢复快捷键注册失败: {}", e);
+                    }
+                }
+            }
+        }
+
+        // 超时自动恢复：若 SuspendHotkey 后 5 秒未收到 RestoreHotkey，自动恢复快捷键
+        if app.current_hotkey.is_none() {
+            if let (Some(ref hotkey_str), Some(suspended_at)) = (&app.suspended_hotkey_str, app.suspended_at) {
+                if suspended_at.elapsed() > Duration::from_secs(5) {
+                    let hotkey = hotkey_str.clone();
+                    eprintln!("[tray] SuspendHotkey 超时，自动恢复快捷键: {}", hotkey);
+                    if let Err(e) = app.register_hotkey(&hotkey) {
+                        eprintln!("[tray] 自动恢复快捷键失败: {}", e);
                     }
                 }
             }
