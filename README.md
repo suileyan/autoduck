@@ -6,8 +6,6 @@
 
 <a id="中文"></a>
 
-## 中文
-
 麦克风人声自动降音量系统 — 检测到麦克风人声时自动压低系统音量，说话结束后恢复。纯本地运行，托盘后台进程，Release 构建无控制台窗口。
 
 ### 功能特性
@@ -29,6 +27,7 @@
 - **崩溃可观测**：工作线程 panic 时自动恢复音量并提示
 - **配置持久化**：TOML 格式配置文件，首次运行自动生成，原子写入防损坏
 - **开机自启**：注册表方式，托盘菜单一键开关
+- **全局快捷键**：可自定义快捷键一键切换启用/禁用，GUI 中支持按键捕获设置
 
 ### 系统要求
 
@@ -52,7 +51,7 @@
 
 ### 配置文件
 
-配置文件位于程序同目录下的 `config.toml`，首次运行自动生成。
+配置文件位于 `%APPDATA%\AutoDuck\config.toml`，首次运行自动生成。若 exe 同目录下存在旧版配置文件，会自动迁移到新路径。
 
 ```toml
 # 降音模式："global" (全局主音量) 或 "apps" (应用级排除)
@@ -84,6 +83,12 @@ spectral_flatness_threshold = 0.65
 
 # 噪声底倍率 (1.0 - 5.0)，有效阈值 = max(用户阈值, 噪声底 × 倍率)
 noise_floor_multiplier = 2.0
+
+# 是否启用降音 (true/false)
+enabled = true
+
+# 全局快捷键，按下切换启用/禁用
+hotkey = "Ctrl+Shift+D"
 ```
 
 ### 参数调优建议
@@ -111,6 +116,7 @@ noise_floor_multiplier = 2.0
 ┌─────────────┐    TrayEvent                                   │
 │  托盘线程    │────────────────────────────────────────────────▶│  主事件循环
 │  win32 消息  │                                                │  (main.rs)
+│  + 快捷键    │                                                │
 └─────────────┘                                                │
                                                                │
 ┌─────────────┐    GuiMessage                                  │
@@ -127,7 +133,7 @@ noise_floor_multiplier = 2.0
 | 音频回调 | 采集 + 降混 + 写入 ring buffer | 无 |
 | VAD | 重采样 → 频谱平坦度 → earshot → 状态机 | 无 |
 | 音量控制 | 接收状态变更 → 执行降音/恢复 | `COINIT_MULTITHREADED` |
-| 托盘 | win32 消息循环 + 菜单事件 | 无 |
+| 托盘 | win32 消息循环 + 菜单事件 + 全局快捷键 | 无 |
 | GUI | slint 设置窗口事件循环 | 无 |
 
 ### 音频处理链路
@@ -187,8 +193,6 @@ MIT
 
 <a id="english"></a>
 
-## English
-
 Auto ducking system — automatically lowers system volume when speech is detected on the microphone, and restores it when you stop talking. Runs entirely locally as a system tray background process with no console window in Release builds.
 
 ### Features
@@ -210,6 +214,7 @@ Auto ducking system — automatically lowers system volume when speech is detect
 - **Crash Observability**: Automatically restores volume and notifies when worker threads panic
 - **Persistent Configuration**: TOML config file auto-generated on first run, with atomic writes to prevent corruption
 - **Auto-Start on Boot**: Registry-based, toggleable from the tray menu
+- **Global Hotkey**: Customizable hotkey to toggle enable/disable, with key capture in the GUI settings
 - **No Console Window**: Release builds don't show a console window
 
 ### System Requirements
@@ -234,7 +239,7 @@ Download the latest zip file from the [Releases](https://github.com/suileyan/aut
 
 ### Configuration File
 
-The configuration file is located at `config.toml` in the same directory as the executable, auto-generated on first run.
+The configuration file is located at `%APPDATA%\AutoDuck\config.toml`, auto-generated on first run. If a legacy config file exists in the executable's directory, it will be automatically migrated to the new path.
 
 ```toml
 # Ducking mode: "global" (master volume) or "apps" (per-app exclusion)
@@ -266,6 +271,12 @@ spectral_flatness_threshold = 0.65
 
 # Noise floor multiplier (1.0 - 5.0), effective threshold = max(user threshold, noise floor × multiplier)
 noise_floor_multiplier = 2.0
+
+# Whether ducking is enabled (true/false)
+enabled = true
+
+# Global hotkey, press to toggle enable/disable
+hotkey = "Ctrl+Shift+D"
 ```
 
 ### Tuning Guide
@@ -294,6 +305,7 @@ noise_floor_multiplier = 2.0
 ┌─────────────┐    TrayEvent                                   │
 │  Tray thread │────────────────────────────────────────────────▶│  Main event loop
 │  win32 msg   │                                                │  (main.rs)
+│  + hotkey    │                                                │
 └─────────────┘                                                │
                                                                │
 ┌─────────────┐    GuiMessage                                  │
@@ -310,7 +322,7 @@ noise_floor_multiplier = 2.0
 | Audio callback | Capture + downmix + write to ring buffer | None |
 | VAD | Resample → spectral flatness → earshot → state machine | None |
 | Volume control | Receive state changes → execute duck/restore | `COINIT_MULTITHREADED` |
-| Tray | Win32 message loop + menu events | None |
+| Tray | Win32 message loop + menu events + global hotkey | None |
 | GUI | Slint settings window event loop | None |
 
 ### Audio Processing Pipeline
